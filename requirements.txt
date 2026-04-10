@@ -1,0 +1,17 @@
+# Core
+torch>=2.0.0
+torchaudio>=2.0.0
+numpy
+
+# Inference server
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Spectrogram visualization
+matplotlib
+
+# For Trainium (install separately on Trn instances):
+# torch-neuronx  (via Neuron SDK)
+# OR
+# torch-xla  (via older Neuron SDK)

@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Speech Enhancement Arena</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --surface2: #21262d;
+    --border: #30363d; --text: #e6edf3; --text2: #8b949e;
+    --accent: #58a6ff; --green: #3fb950; --orange: #d29922;
+    --red: #f85149; --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
+
+  .header {
+    padding: 24px 32px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px;
+  }
+  .header h1 { font-size: 24px; font-weight: 600; }
+  .header .badge {
+    font-size: 11px; padding: 3px 8px; border-radius: 12px;
+    background: var(--accent); color: var(--bg); font-weight: 600;
+  }
+  .tabs {
+    display: flex; gap: 0; border-bottom: 1px solid var(--border);
+    padding: 0 32px;
+  }
+  .tab {
+    padding: 12px 20px; cursor: pointer; color: var(--text2);
+    border-bottom: 2px solid transparent; font-size: 14px;
+    transition: all 0.2s;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px 32px; }
+
+  /* Controls */
+  .controls {
+    display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+    padding: 20px; background: var(--surface); border-radius: 8px;
+    border: 1px solid var(--border); margin-bottom: 24px;
+  }
+  .control-group { display: flex; flex-direction: column; gap: 4px; }
+  .control-group label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; }
+  select, input[type="range"] {
+    background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 14px;
+  }
+  .btn {
+    padding: 10px 24px; border: none; border-radius: 6px; font-size: 14px;
+    font-weight: 600; cursor: pointer; transition: all 0.15s;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .btn-primary { background: var(--accent); color: var(--bg); }
+  .btn-primary:hover { filter: brightness(1.2); }
+  .btn-record { background: var(--red); color: white; }
+  .btn-record.recording { animation: pulse 1s infinite; }
+  .btn-upload { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+  /* Results grid */
+  .results-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+    margin-top: 24px;
+  }
+  .result-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+  }
+  .result-card.winner { border-color: var(--green); box-shadow: 0 0 20px rgba(63,185,80,0.15); }
+  .card-header {
+    padding: 12px 16px; display: flex; justify-content: space-between;
+    align-items: center; border-bottom: 1px solid var(--border);
+  }
+  .card-header h3 { font-size: 14px; font-weight: 600; }
+  .card-header .time { font-size: 12px; color: var(--text2); }
+  .card-header .badge-trained { font-size: 10px; padding: 2px 6px; border-radius: 8px; background: var(--green); color: var(--bg); }
+  .card-header .badge-random { font-size: 10px; padding: 2px 6px; border-radius: 8px; background: var(--orange); color: var(--bg); }
+  .card-body { padding: 16px; }
+  .card-body img { width: 100%; border-radius: 4px; margin-bottom: 12px; }
+  .card-body audio { width: 100%; height: 36px; }
+
+  /* Training dashboard */
+  .training-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+  }
+  .training-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px;
+  }
+  .training-card h3 { font-size: 14px; margin-bottom: 12px; }
+  .training-card canvas { width: 100%; height: 200px; }
+  .metric { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .metric-label { font-size: 12px; color: var(--text2); margin-top: 4px; }
+
+  .status-bar {
+    padding: 12px 16px; background: var(--surface2); border-radius: 6px;
+    font-size: 13px; color: var(--text2); margin-bottom: 16px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .spinner { width: 14px; height: 14px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .hidden { display: none; }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .results-grid, .training-grid { grid-template-columns: 1fr; }
+    .controls { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Speech Enhancement Arena</h1>
+  <span class="badge">LIVE</span>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="enhance" onclick="switchTab('enhance')">Enhance</div>
+  <div class="tab" data-tab="training" onclick="switchTab('training')">Training Dashboard</div>
+</div>
+
+<!-- ENHANCE TAB -->
+<div id="tab-enhance" class="container">
+  <div class="controls">
+    <div class="control-group">
+      <label>Input</label>
+      <div style="display:flex; gap:8px;">
+        <button class="btn btn-record" id="btn-record" onclick="toggleRecord()">
+          <span id="record-icon">&#9679;</span> Record
+        </button>
+        <button class="btn btn-upload" onclick="document.getElementById('file-input').click()">
+          &#8593; Upload WAV
+        </button>
+        <input type="file" id="file-input" accept=".wav,audio/*" class="hidden" onchange="handleFile(event)">
+      </div>
+    </div>
+    <div class="control-group">
+      <label>Noise Type</label>
+      <select id="noise-type">
+        <option value="white">White Noise</option>
+        <option value="pink">Pink Noise</option>
+        <option value="babble">Multi-Speaker Babble</option>
+      </select>
+    </div>
+    <div class="control-group">
+      <label>SNR: <span id="snr-val">5</span> dB</label>
+      <input type="range" id="snr-slider" min="-10" max="20" value="5" step="1"
+             oninput="document.getElementById('snr-val').textContent=this.value">
+    </div>
+    <div class="control-group" style="margin-left:auto;">
+      <label>&nbsp;</label>
+      <button class="btn btn-primary" id="btn-enhance" onclick="enhance()" disabled>
+        Enhance &#9654;
+      </button>
+    </div>
+  </div>
+
+  <div id="status" class="status-bar hidden">
+    <div class="spinner"></div>
+    <span id="status-text">Processing...</span>
+  </div>
+
+  <!-- Original + Noisy row -->
+  <div id="source-row" class="results-grid hidden" style="margin-bottom:16px;">
+    <div class="result-card">
+      <div class="card-header"><h3>Original (Clean)</h3></div>
+      <div class="card-body">
+        <img id="spec-original" alt="Spectrogram">
+        <audio id="audio-original" controls></audio>
+      </div>
+    </div>
+    <div class="result-card">
+      <div class="card-header"><h3>Noisy Input</h3></div>
+      <div class="card-body">
+        <img id="spec-noisy" alt="Spectrogram">
+        <audio id="audio-noisy" controls></audio>
+      </div>
+    </div>
+  </div>
+
+  <!-- Enhanced results -->
+  <div id="results" class="results-grid"></div>
+</div>
+
+<!-- TRAINING TAB -->
+<div id="tab-training" class="container hidden">
+  <div class="status-bar">
+    <span>Training logs auto-refresh every 3 seconds</span>
+    <button class="btn btn-upload" onclick="refreshTraining()" style="margin-left:auto; padding:6px 12px;">
+      Refresh
+    </button>
+  </div>
+  <div id="training-content" class="training-grid"></div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+let audioBlob = null;
+let mediaRecorder = null;
+let isRecording = false;
+let trainingInterval = null;
+
+const MODEL_COLORS = {
+  conv_mask: '#58a6ff',
+  crm: '#3fb950',
+  attention: '#bc8cff',
+  gru: '#d29922',
+};
+
+// ---------------------------------------------------------------------------
+// Tab switching
+// ---------------------------------------------------------------------------
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.tab[data-tab="${tab}"]`).classList.add('active');
+  document.getElementById('tab-enhance').classList.toggle('hidden', tab !== 'enhance');
+  document.getElementById('tab-training').classList.toggle('hidden', tab !== 'training');
+
+  if (tab === 'training') {
+    refreshTraining();
+    if (!trainingInterval) trainingInterval = setInterval(refreshTraining, 3000);
+  } else {
+    if (trainingInterval) { clearInterval(trainingInterval); trainingInterval = null; }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Recording
+// ---------------------------------------------------------------------------
+async function toggleRecord() {
+  const btn = document.getElementById('btn-record');
+  if (isRecording) {
+    mediaRecorder.stop();
+    btn.classList.remove('recording');
+    btn.innerHTML = '<span>&#9679;</span> Record';
+    isRecording = false;
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
+    const chunks = [];
+    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+
+    mediaRecorder.ondataavailable = e => chunks.push(e.data);
+    mediaRecorder.onstop = () => {
+      audioBlob = new Blob(chunks, { type: 'audio/webm' });
+      stream.getTracks().forEach(t => t.stop());
+      document.getElementById('btn-enhance').disabled = false;
+    };
+
+    mediaRecorder.start();
+    btn.classList.add('recording');
+    btn.innerHTML = '<span>&#9632;</span> Stop';
+    isRecording = true;
+
+    // Auto-stop after 10 seconds
+    setTimeout(() => { if (isRecording) toggleRecord(); }, 10000);
+  } catch (err) {
+    alert('Microphone access denied. Please allow mic access and try again.');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// File upload
+// ---------------------------------------------------------------------------
+function handleFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  audioBlob = file;
+  document.getElementById('btn-enhance').disabled = false;
+}
+
+// ---------------------------------------------------------------------------
+// Enhancement
+// ---------------------------------------------------------------------------
+async function enhance() {
+  if (!audioBlob) return;
+
+  const statusEl = document.getElementById('status');
+  const statusText = document.getElementById('status-text');
+  statusEl.classList.remove('hidden');
+  statusText.textContent = 'Sending audio to arena models...';
+  document.getElementById('btn-enhance').disabled = true;
+
+  const formData = new FormData();
+  formData.append('file', audioBlob, 'recording.wav');
+  formData.append('noise_type', document.getElementById('noise-type').value);
+  formData.append('snr_db', document.getElementById('snr-slider').value);
+
+  try {
+    const resp = await fetch('/api/enhance', { method: 'POST', body: formData });
+    const data = await resp.json();
+    renderResults(data);
+  } catch (err) {
+    statusText.textContent = `Error: ${err.message}`;
+    setTimeout(() => statusEl.classList.add('hidden'), 3000);
+  }
+
+  document.getElementById('btn-enhance').disabled = false;
+}
+
+// ---------------------------------------------------------------------------
+// Render results
+// ---------------------------------------------------------------------------
+function renderResults(data) {
+  document.getElementById('status').classList.add('hidden');
+  const sourceRow = document.getElementById('source-row');
+  sourceRow.classList.remove('hidden');
+
+  // Original + noisy
+  if (data.original.spectrogram_b64) {
+    document.getElementById('spec-original').src = 'data:image/png;base64,' + data.original.spectrogram_b64;
+  }
+  document.getElementById('audio-original').src = 'data:audio/wav;base64,' + data.original.audio_b64;
+
+  if (data.noisy.spectrogram_b64) {
+    document.getElementById('spec-noisy').src = 'data:image/png;base64,' + data.noisy.spectrogram_b64;
+  }
+  document.getElementById('audio-noisy').src = 'data:audio/wav;base64,' + data.noisy.audio_b64;
+
+  // Enhanced models
+  const resultsDiv = document.getElementById('results');
+  resultsDiv.innerHTML = '';
+
+  // Sort by inference time (fastest first) — or we could sort by trained status
+  const entries = Object.entries(data.enhanced);
+
+  entries.forEach(([key, result]) => {
+    const card = document.createElement('div');
+    card.className = 'result-card';
+
+    const badge = result.trained
+      ? '<span class="badge-trained">TRAINED</span>'
+      : '<span class="badge-random">UNTRAINED</span>';
+
+    card.innerHTML = `
+      <div class="card-header">
+        <h3 style="color:${MODEL_COLORS[key] || '#fff'}">${result.name}</h3>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="time">${result.inference_ms}ms</span>
+          ${badge}
+        </div>
+      </div>
+      <div class="card-body">
+        ${result.spectrogram_b64
+          ? `<img src="data:image/png;base64,${result.spectrogram_b64}" alt="Spectrogram">`
+          : ''}
+        <audio controls src="data:audio/wav;base64,${result.audio_b64}" style="width:100%"></audio>
+      </div>
+    `;
+    resultsDiv.appendChild(card);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Training dashboard
+// ---------------------------------------------------------------------------
+async function refreshTraining() {
+  try {
+    const resp = await fetch('/api/training_logs');
+    const data = await resp.json();
+    renderTraining(data);
+  } catch (err) {
+    // Server may not be running or no logs yet
+  }
+}
+
+function renderTraining(data) {
+  const container = document.getElementById('training-content');
+  container.innerHTML = '';
+
+  if (!Object.keys(data).length) {
+    container.innerHTML = '<div class="status-bar">No training logs yet. Run arena.py to start.</div>';
+    return;
+  }
+
+  // One card per model with a canvas for the loss curve
+  for (const [runId, runData] of Object.entries(data)) {
+    const modelKey = runId.replace('arena_', '');
+    const color = MODEL_COLORS[modelKey] || '#fff';
+    const epochs = runData.epochs || [];
+    const final = runData.final;
+    const header = runData.header;
+
+    const card = document.createElement('div');
+    card.className = 'training-card';
+
+    const latestEpoch = epochs.length ? epochs[epochs.length - 1] : null;
+    const siSdr = latestEpoch ? latestEpoch.si_sdr : '—';
+    const loss = latestEpoch ? latestEpoch.loss : '—';
+    const status = final ? '✓ Complete' : `Epoch ${epochs.length}`;
+
+    card.innerHTML = `
+      <h3 style="color:${color}">${header?.model || modelKey}
+        <span style="float:right;font-size:12px;color:var(--text2)">${status}</span>
+      </h3>
+      <div style="display:flex;gap:24px;margin:12px 0;">
+        <div>
+          <div class="metric" style="color:${color}">${typeof siSdr === 'number' ? siSdr.toFixed(1) : siSdr}</div>
+          <div class="metric-label">SI-SDR (dB)</div>
+        </div>
+        <div>
+          <div class="metric">${typeof loss === 'number' ? loss.toFixed(3) : loss}</div>
+          <div class="metric-label">Loss</div>
+        </div>
+        ${final ? `<div>
+          <div class="metric">${final.total_time_sec?.toFixed(0) || '?'}s</div>
+          <div class="metric-label">Total Time</div>
+        </div>` : ''}
+      </div>
+      <canvas id="chart-${modelKey}" height="150"></canvas>
+    `;
+    container.appendChild(card);
+
+    // Draw simple loss curve
+    if (epochs.length > 1) {
+      requestAnimationFrame(() => drawChart(`chart-${modelKey}`, epochs, color));
+    }
+  }
+}
+
+function drawChart(canvasId, epochs, color) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width = canvas.offsetWidth * 2;
+  const H = canvas.height = 300;
+  ctx.clearRect(0, 0, W, H);
+
+  const losses = epochs.map(e => e.loss);
+  const minL = Math.min(...losses);
+  const maxL = Math.max(...losses);
+  const range = maxL - minL || 1;
+  const pad = 20;
+
+  // Grid
+  ctx.strokeStyle = '#30363d';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad + (H - 2*pad) * i / 4;
+    ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(W - pad, y); ctx.stroke();
+  }
+
+  // Loss curve
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  epochs.forEach((e, i) => {
+    const x = pad + (W - 2*pad) * i / (epochs.length - 1);
+    const y = pad + (H - 2*pad) * (1 - (e.loss - minL) / range);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // SI-SDR curve (secondary, dashed)
+  const siSdrs = epochs.map(e => e.si_sdr);
+  const minS = Math.min(...siSdrs);
+  const maxS = Math.max(...siSdrs);
+  const rangeS = maxS - minS || 1;
+
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  ctx.globalAlpha = 0.5;
+  ctx.beginPath();
+  epochs.forEach((e, i) => {
+    const x = pad + (W - 2*pad) * i / (epochs.length - 1);
+    const y = pad + (H - 2*pad) * (1 - (e.si_sdr - minS) / rangeS);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+
+  // Labels
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '20px sans-serif';
+  ctx.fillText(`Loss: ${losses[losses.length-1]?.toFixed(3)}`, pad + 4, pad + 16);
+  ctx.fillText(`SI-SDR: ${siSdrs[siSdrs.length-1]?.toFixed(1)} dB`, pad + 4, pad + 38);
+}
+
+// Check for models on load
+fetch('/api/models').then(r => r.json()).then(models => {
+  console.log('Available models:', models);
+}).catch(() => {});
+</script>
+</body>
+</html>
