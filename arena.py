@@ -137,7 +137,8 @@ def launch_arena(args):
             if mig_uuids and i < len(mig_uuids):
                 env["CUDA_VISIBLE_DEVICES"] = mig_uuids[i]
             else:
-                env["CUDA_VISIBLE_DEVICES"] = str(i)
+                # Single GPU without MIG: all processes share GPU 0
+                env["CUDA_VISIBLE_DEVICES"] = "0"
 
         elif args.device == "neuron":
             # TorchNeuron native: isolate to one NeuronCore per model
