@@ -104,6 +104,29 @@ def load_models(checkpoint_dir, device_str="cpu"):
 # Audio processing
 # ---------------------------------------------------------------------------
 
+def _load_wav(buf):
+    """Load WAV from file/BytesIO using the wave module (no torchcodec needed)."""
+    import wave
+    with wave.open(buf, "rb") as wf:
+        sr = wf.getframerate()
+        n_frames = wf.getnframes()
+        n_channels = wf.getnchannels()
+        sampwidth = wf.getsampwidth()
+        raw = wf.readframes(n_frames)
+
+    if sampwidth == 2:
+        samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif sampwidth == 4:
+        samples = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+    else:
+        samples = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) / 128.0 - 1.0
+
+    audio = torch.from_numpy(samples)
+    if n_channels > 1:
+        audio = audio.reshape(-1, n_channels)[:, 0]  # take first channel
+    return audio, sr
+
+
 def add_noise(audio, noise_type="white", snr_db=5):
     """Add noise to clean audio at specified SNR."""
     length = audio.shape[-1]
@@ -219,11 +242,10 @@ async def enhance_audio(
     Upload a WAV file, get back enhanced versions from all models.
     Optionally adds noise first (for demo purposes with clean recordings).
     """
-    # Load audio
+    # Load audio — use wave module to avoid torchcodec dependency
     audio_bytes = await file.read()
     buf = io.BytesIO(audio_bytes)
-    audio, sr = torchaudio.load(buf)
-    audio = audio[0]  # mono
+    audio, sr = _load_wav(buf)
 
     if sr != 16000:
         audio = torchaudio.functional.resample(audio, sr, 16000)
