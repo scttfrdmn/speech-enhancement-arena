@@ -254,7 +254,7 @@ def train(args):
     elif args.compile and device_type == "xla":
         print(f"[compile] torch.compile not supported on legacy XLA path — skipping")
 
-    # Data
+    # Data — synthetic data is generated directly on the accelerator
     loader = make_dataloader(
         clean_dir=args.clean_dir,
         batch_size=args.batch_size,
@@ -263,6 +263,7 @@ def train(args):
         duration=args.duration,
         sr=args.sr,
         snr_range=(args.snr_min, args.snr_max),
+        device=device,
     )
 
     # Optimizer

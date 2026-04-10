@@ -31,17 +31,17 @@ def white_noise(length, device="cpu"):
 
 
 def pink_noise(length, device="cpu"):
-    """Approximate 1/f noise via filtering white noise."""
-    white = torch.randn(length + 1024, device=device)
-    # Simple IIR approximation of pink noise
-    b = torch.tensor([0.049922035, -0.095993537, 0.050612699, -0.004709510], device=device)
-    a = torch.tensor([1.0, -2.494956002, 2.017265875, -0.522189400], device=device)
-    # Manual filter (avoid scipy dependency)
-    pink = torch.zeros(length + 1024, device=device)
-    for i in range(4, len(pink)):
-        pink[i] = (b[0]*white[i] + b[1]*white[i-1] + b[2]*white[i-2] + b[3]*white[i-3]
-                    - a[1]*pink[i-1] - a[2]*pink[i-2] - a[3]*pink[i-3])
-    return pink[1024:1024+length]
+    """Approximate 1/f noise via spectral shaping (vectorized)."""
+    white = torch.randn(length, device=device)
+    S = torch.fft.rfft(white)
+    freqs = torch.fft.rfftfreq(length, device=device)
+    # 1/f spectral shape, skip DC
+    freqs[0] = 1.0
+    S = S / freqs.sqrt()
+    S[0] = 0  # zero DC
+    pink = torch.fft.irfft(S, n=length)
+    pink = pink / (pink.abs().max() + 1e-8)
+    return pink
 
 
 def babble_noise(length, num_speakers=6, device="cpu"):
@@ -53,37 +53,38 @@ def babble_noise(length, num_speakers=6, device="cpu"):
 
 
 def _generate_formant_signal(length, sr=16000, device="cpu"):
-    """Generate a single synthetic speech-like signal with formant structure."""
+    """Generate a single synthetic speech-like signal with formant structure (vectorized)."""
     t = torch.linspace(0, length / sr, length, device=device)
 
     # Random fundamental frequency (pitch)
     f0 = random.uniform(80, 300)  # Hz
 
     # Random formants (vowel-like)
-    formants = [
+    formants = torch.tensor([
         random.uniform(200, 900),   # F1
         random.uniform(800, 2500),  # F2
         random.uniform(1800, 3500), # F3
-    ]
-    bandwidths = [80, 120, 150]
+    ], device=device)
+    bandwidths = torch.tensor([200.0, 300.0, 400.0], device=device)
 
-    # Generate glottal pulse train
-    signal = torch.zeros_like(t)
-    for k in range(1, 30):  # harmonics
-        amp = 1.0 / (k ** 1.2)  # spectral tilt
-        signal += amp * torch.sin(2 * np.pi * f0 * k * t)
+    # Generate glottal pulse train — vectorized over all harmonics
+    ks = torch.arange(1, 30, device=device, dtype=torch.float32)
+    amps = 1.0 / (ks ** 1.2)  # spectral tilt
+    # (harmonics, time) -> sum over harmonics
+    phases = 2 * np.pi * f0 * ks.unsqueeze(1) * t.unsqueeze(0)
+    signal = (amps.unsqueeze(1) * torch.sin(phases)).sum(0)
 
-    # Apply formant resonances (bandpass-like amplitude shaping)
-    # This is a simplification — real formants are IIR filters
-    # But for training data, amplitude modulation is sufficient
-    for fc, bw in zip(formants, bandwidths):
-        formant_env = torch.exp(-0.5 * ((torch.fft.rfftfreq(length, 1/sr, device=device) - fc) / bw) ** 2)
-        S = torch.fft.rfft(signal)
-        S = S * formant_env
-        signal = torch.fft.irfft(S, n=length)
+    # Apply formant resonances additively (sum of bandpass filters)
+    # This is more robust than multiplicative — no risk of collapsing to zero
+    freqs = torch.fft.rfftfreq(length, 1/sr, device=device)
+    S = torch.fft.rfft(signal)
+    formant_env = torch.zeros_like(freqs)
+    for i in range(3):
+        formant_env = formant_env + torch.exp(-0.5 * ((freqs - formants[i]) / bandwidths[i]) ** 2)
+    signal = torch.fft.irfft(S * formant_env, n=length)
 
     # Random amplitude envelope (syllable-like rhythm)
-    envelope_freq = random.uniform(2, 6)  # syllable rate
+    envelope_freq = random.uniform(2, 6)
     envelope = 0.5 + 0.5 * torch.sin(2 * np.pi * envelope_freq * t + random.uniform(0, 2*np.pi))
     signal = signal * envelope
 
@@ -202,22 +203,97 @@ class WavFileDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
+# GPU batch generator — generates entire batches on-device
+# ---------------------------------------------------------------------------
+
+def _generate_batch_on_device(batch_size, length, sr, snr_range, device):
+    """Generate a full batch of noisy/clean pairs directly on the accelerator."""
+    t = torch.linspace(0, length / sr, length, device=device)
+
+    clean_batch = torch.zeros(batch_size, length, device=device)
+    for b in range(batch_size):
+        clean_batch[b] = _generate_formant_signal(length, sr=sr, device=device)
+    clean_batch = clean_batch / (clean_batch.abs().amax(dim=-1, keepdim=True) + 1e-8) * 0.9
+
+    # Vectorized noise: random mix of white and pink (babble is slow, skip for GPU batches)
+    noise = torch.randn(batch_size, length, device=device)
+    # Apply random 1/f shaping to ~half the batch
+    pink_mask = torch.rand(batch_size, device=device) > 0.5
+    if pink_mask.any():
+        S = torch.fft.rfft(noise[pink_mask])
+        freqs = torch.fft.rfftfreq(length, device=device)
+        freqs[0] = 1.0
+        S = S / freqs.sqrt()
+        S[:, 0] = 0
+        noise[pink_mask] = torch.fft.irfft(S, n=length)
+
+    # Random SNR per sample
+    snr_db = torch.empty(batch_size, 1, device=device).uniform_(snr_range[0], snr_range[1])
+    snr_linear = 10 ** (snr_db / 20)
+
+    clean_rms = clean_batch.pow(2).mean(dim=-1, keepdim=True).sqrt()
+    noise_rms = noise.pow(2).mean(dim=-1, keepdim=True).sqrt()
+    noise = noise * (clean_rms / (noise_rms * snr_linear + 1e-8))
+
+    noisy = clean_batch + noise
+    peak = noisy.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
+    return noisy / peak, clean_batch / peak
+
+
+class GPUBatchGenerator:
+    """
+    Iterator that generates synthetic batches directly on the accelerator.
+    Bypasses DataLoader entirely — no CPU-to-GPU transfer, no worker processes.
+    """
+
+    def __init__(self, num_samples=5000, batch_size=32, duration=1.0,
+                 sr=16000, snr_range=(-5, 15), device="cpu"):
+        self.num_batches = num_samples // batch_size
+        self.batch_size = batch_size
+        self.length = int(duration * sr)
+        self.sr = sr
+        self.snr_range = snr_range
+        self.device = device
+
+    def __len__(self):
+        return self.num_batches
+
+    def __iter__(self):
+        for _ in range(self.num_batches):
+            yield _generate_batch_on_device(
+                self.batch_size, self.length, self.sr,
+                self.snr_range, self.device,
+            )
+
+
+# ---------------------------------------------------------------------------
 # DataLoader factory
 # ---------------------------------------------------------------------------
 
-def make_dataloader(clean_dir=None, batch_size=32, num_workers=4, **kwargs):
-    """Create a dataloader — synthetic if no clean_dir, real files otherwise."""
+def make_dataloader(clean_dir=None, batch_size=32, num_workers=4,
+                    device="cpu", **kwargs):
+    """Create a dataloader — GPU generator for synthetic, DataLoader for files."""
     if clean_dir and Path(clean_dir).exists():
         dataset = WavFileDataset(clean_dir, **kwargs)
         print(f"[data] Loaded {len(dataset)} wav files from {clean_dir}")
+        return DataLoader(
+            dataset, batch_size=batch_size, shuffle=True,
+            num_workers=num_workers, pin_memory=True, drop_last=True,
+        )
     else:
-        dataset = SyntheticSpeechDataset(**kwargs)
-        print(f"[data] Using synthetic data ({len(dataset)} samples)")
-
-    return DataLoader(
-        dataset, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True, drop_last=True,
-    )
+        # Use GPU batch generator for synthetic data
+        num_samples = kwargs.get("num_samples", 5000)
+        duration = kwargs.get("duration", 1.0)
+        sr = kwargs.get("sr", 16000)
+        snr_range = kwargs.get("snr_range", (-5, 15))
+        gen = GPUBatchGenerator(
+            num_samples=num_samples, batch_size=batch_size,
+            duration=duration, sr=sr, snr_range=snr_range,
+            device=device,
+        )
+        print(f"[data] GPU batch generator ({num_samples} samples, "
+              f"{len(gen)} batches on {device})")
+        return gen
 
 
 if __name__ == "__main__":
