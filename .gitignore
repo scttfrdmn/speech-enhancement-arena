@@ -11,6 +11,9 @@ venv/
 .venv/
 env/
 
+# uv
+uv.lock
+
 # Training artifacts
 checkpoints/
 logs/
