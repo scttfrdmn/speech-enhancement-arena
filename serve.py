@@ -136,6 +136,9 @@ def compute_spectrogram(audio, sr=16000):
 
 def audio_to_base64_wav(audio_tensor, sr=16000):
     """Convert audio tensor to base64-encoded WAV."""
+    import wave
+    import struct
+
     audio_tensor = audio_tensor.unsqueeze(0) if audio_tensor.dim() == 1 else audio_tensor
     audio_tensor = audio_tensor.cpu().float()
     # Normalize
@@ -143,8 +146,14 @@ def audio_to_base64_wav(audio_tensor, sr=16000):
     if peak > 0:
         audio_tensor = audio_tensor / peak * 0.95
 
+    # Write WAV directly to avoid torchcodec BytesIO limitation
+    samples = (audio_tensor[0] * 32767).clamp(-32768, 32767).short()
     buf = io.BytesIO()
-    torchaudio.save(buf, audio_tensor, sr, format="wav")
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(samples.numpy().tobytes())
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("utf-8")
 
@@ -344,7 +353,7 @@ def main():
     parser = argparse.ArgumentParser(description="Speech Enhancement Arena — Live Demo")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     parser.add_argument("--device", type=str, default="cpu",
-                        choices=["cpu", "cuda", "neuron", "xla"])
+                        choices=["cpu", "cuda", "mps", "neuron", "xla"])
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="0.0.0.0")
     args = parser.parse_args()

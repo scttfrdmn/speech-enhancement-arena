@@ -232,7 +232,8 @@ def launch_arena(args):
     print()
     winner = results[0]
     print(f"  WINNER: {winner['description']}")
-    print(f"  Checkpoint: {ckpt_dir / f'arena_{winner[\"model\"]}_best.pt'}")
+    winner_model = winner["model"]
+    print(f"  Checkpoint: {ckpt_dir / f'arena_{winner_model}_best.pt'}")
     print()
     print(f"  Total arena time: {total_time:.1f}s")
     print(f"  (Sequential would have taken: ~{sum(r['total_time'] for r in results):.1f}s)")
@@ -287,7 +288,7 @@ def _read_final_metric(log_file):
 def main():
     parser = argparse.ArgumentParser(description="Speech Enhancement Arena")
     parser.add_argument("--device", type=str, default="cuda",
-                        choices=["cuda", "neuron", "xla", "cpu"])
+                        choices=["cuda", "mps", "neuron", "xla", "cpu"])
     parser.add_argument("--compile", action="store_true",
                         help="Pass --compile to each training process (torch.compile)")
     parser.add_argument("--epochs", type=int, default=30)

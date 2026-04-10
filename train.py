@@ -106,6 +106,7 @@ def setup_device(device_str):
     """
     Set up compute device. Supports:
       - "cuda"   — NVIDIA GPU (uses CUDA_VISIBLE_DEVICES for MIG slice selection)
+      - "mps"    — Apple Silicon GPU (Metal Performance Shaders)
       - "neuron" — TorchNeuron native backend (Neuron SDK 2.28+, PyTorch 2.9+)
                    Supports eager mode, torch.compile, and native distributed APIs.
                    This is the recommended path for Trainium going forward.
@@ -114,7 +115,15 @@ def setup_device(device_str):
                    Will be deprecated when TorchNeuron transitions fully in PyTorch 2.10+.
       - "cpu"    — Fallback for testing without accelerators.
     """
-    if device_str == "cuda":
+    if device_str == "mps":
+        if not torch.backends.mps.is_available():
+            print("[warn] MPS not available, falling back to CPU")
+            return torch.device("cpu"), "cpu"
+        device = torch.device("mps")
+        print("[device] Apple Silicon GPU via Metal Performance Shaders")
+        return device, "mps"
+
+    elif device_str == "cuda":
         if not torch.cuda.is_available():
             print("[warn] CUDA not available, falling back to CPU")
             return torch.device("cpu"), "cpu"
@@ -233,7 +242,7 @@ def train(args):
     #   First epoch is slower (compilation), subsequent epochs are faster.
     # On CUDA: uses torch.compile's default inductor backend.
     # On XLA (legacy): not supported — skip.
-    if args.compile and device_type in ("neuron", "cuda"):
+    if args.compile and device_type in ("neuron", "cuda", "mps"):
         print(f"[compile] Wrapping model with torch.compile (backend={'neuron' if device_type == 'neuron' else 'inductor'})")
         try:
             backend = None  # use default (inductor for CUDA, neuron for TorchNeuron)
@@ -377,9 +386,9 @@ def main():
     parser.add_argument("--run-id", type=str, default="run_0",
                         help="Unique run identifier (used for logging and checkpoints)")
     parser.add_argument("--device", type=str, default="cuda",
-                        choices=["cuda", "neuron", "xla", "cpu"],
-                        help="Device: cuda (NVIDIA/MIG), neuron (TorchNeuron native), "
-                             "xla (legacy PyTorch/XLA), cpu")
+                        choices=["cuda", "mps", "neuron", "xla", "cpu"],
+                        help="Device: cuda (NVIDIA/MIG), mps (Apple Silicon), "
+                             "neuron (TorchNeuron native), xla (legacy PyTorch/XLA), cpu")
     parser.add_argument("--compile", action="store_true",
                         help="Wrap model with torch.compile for JIT optimization. "
                              "On neuron: uses Neuron compiler backend. "
