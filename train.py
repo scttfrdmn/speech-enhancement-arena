@@ -129,7 +129,8 @@ def setup_device(device_str):
             return torch.device("cpu"), "cpu"
         device = torch.device("cuda:0")
         name = torch.cuda.get_device_name(0)
-        mem = torch.cuda.get_device_properties(0).total_mem / 1e9
+        props = torch.cuda.get_device_properties(0)
+        mem = getattr(props, 'total_memory', getattr(props, 'total_mem', 0)) / 1e9
         print(f"[device] {name} ({mem:.1f} GB)")
         return device, "cuda"
 
