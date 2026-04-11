@@ -81,7 +81,7 @@ def _can_run_parallel(device, mig_uuids):
     """
     if device == "cuda":
         return len(mig_uuids) >= len(MODELS)
-    if device in ("neuron", "xla", "cpu", "mps"):
+    if device in ("neuron", "xla", "cpu"):
         return True
     return False
 
