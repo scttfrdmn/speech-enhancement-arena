@@ -180,10 +180,13 @@ def collect_system_metrics(device_type):
     except Exception:
         pass
 
-    # GPU metrics (CUDA)
+    # GPU metrics (CUDA) — try torch API first, fall back to nvidia-smi
     if device_type == "cuda":
         try:
             metrics["gpu_util_pct"] = torch.cuda.utilization(0)
+        except Exception:
+            pass
+        try:
             metrics["gpu_mem_used_mb"] = round(torch.cuda.memory_allocated(0) / 1e6, 1)
             props = torch.cuda.get_device_properties(0)
             total = getattr(props, 'total_memory', getattr(props, 'total_mem', 0))
@@ -191,6 +194,22 @@ def collect_system_metrics(device_type):
             metrics["gpu_mem_peak_mb"] = round(torch.cuda.max_memory_allocated(0) / 1e6, 1)
         except Exception:
             pass
+        # Fallback to nvidia-smi if torch API didn't provide utilization
+        if "gpu_util_pct" not in metrics:
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total",
+                     "--format=csv,noheader,nounits", "-i", "0"],
+                    capture_output=True, text=True, timeout=2,
+                )
+                parts = result.stdout.strip().split(", ")
+                if len(parts) == 3:
+                    metrics["gpu_util_pct"] = int(parts[0])
+                    metrics.setdefault("gpu_mem_used_mb", float(parts[1]))
+                    metrics.setdefault("gpu_mem_total_mb", float(parts[2]))
+            except Exception:
+                pass
 
     return metrics
 
