@@ -27,29 +27,81 @@ import math
 # Shared STFT front-end / back-end
 # ---------------------------------------------------------------------------
 
-class STFTProcessor:
-    """Shared STFT/iSTFT logic. Not a module — just config + methods."""
+# Try to import neuron-complex-ops for Trainium-compatible STFT
+try:
+    from neuron_complex import ComplexTensor, real_stft, real_istft
+    _HAS_NEURON_COMPLEX = True
+except ImportError:
+    _HAS_NEURON_COMPLEX = False
 
-    def __init__(self, n_fft=512, hop_length=None, win_length=None):
+
+class STFTProcessor:
+    """Shared STFT/iSTFT logic with pluggable backend.
+
+    backend="native": uses torch.stft/istft (requires complex tensor support — CUDA, CPU, MPS)
+    backend="neuron":  uses neuron-complex-ops real_stft/real_istft (works on Trainium)
+    backend="auto":    uses neuron backend if available and device is xla, else native
+    """
+
+    def __init__(self, n_fft=512, hop_length=None, win_length=None, backend="auto"):
         self.n_fft = n_fft
         self.hop_length = hop_length or n_fft // 4
         self.win_length = win_length or n_fft
+        self.backend = backend
+
+    def _use_neuron(self, device=None):
+        if self.backend == "neuron":
+            return True
+        if self.backend == "native":
+            return False
+        # auto: use neuron if available and on XLA device
+        if _HAS_NEURON_COMPLEX and device is not None:
+            return "xla" in str(device)
+        return False
 
     def stft(self, x):
-        """x: (B, T) -> complex spectrogram (B, F, N)"""
-        window = torch.hann_window(self.win_length, device=x.device)
-        return torch.stft(
-            x, self.n_fft, self.hop_length, self.win_length,
-            window=window, return_complex=True
-        )
+        """x: (B, T) -> complex spectrogram (B, F, N)
+
+        Returns torch complex tensor (native) or ComplexTensor (neuron).
+        Models should use .abs(), .angle(), .real, .imag which work on both.
+        """
+        if self._use_neuron(x.device):
+            window = torch.hann_window(self.win_length, device=x.device)
+            return real_stft(x, self.n_fft, self.hop_length, window=window)
+        else:
+            window = torch.hann_window(self.win_length, device=x.device)
+            return torch.stft(
+                x, self.n_fft, self.hop_length, self.win_length,
+                window=window, return_complex=True
+            )
 
     def istft(self, X, length=None):
-        """X: complex (B, F, N) -> (B, T)"""
-        window = torch.hann_window(self.win_length, device=X.device)
-        return torch.istft(
-            X, self.n_fft, self.hop_length, self.win_length,
-            window=window, length=length
-        )
+        """X: complex (B, F, N) or ComplexTensor -> (B, T)"""
+        if self._use_neuron(X.real.device if hasattr(X, 'real') and isinstance(X.real, torch.Tensor) else None):
+            return real_istft(X, self.n_fft, self.hop_length, length=length)
+        else:
+            window = torch.hann_window(self.win_length, device=X.device)
+            return torch.istft(
+                X, self.n_fft, self.hop_length, self.win_length,
+                window=window, length=length
+            )
+
+
+def _polar(mag, phase):
+    """Create complex from magnitude and phase — works with both backends."""
+    if _HAS_NEURON_COMPLEX and isinstance(mag, torch.Tensor):
+        # Check if we should use ComplexTensor (when on XLA/Trainium)
+        if "xla" in str(mag.device):
+            return ComplexTensor.from_polar(mag, phase)
+    return torch.polar(mag, phase)
+
+
+def _complex(real, imag):
+    """Create complex from real and imag — works with both backends."""
+    if _HAS_NEURON_COMPLEX and isinstance(real, torch.Tensor):
+        if "xla" in str(real.device):
+            return ComplexTensor(real, imag)
+    return torch.complex(real, imag)
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +211,7 @@ class ConvMaskNet(nn.Module):
         mask = self.output_proj(h)
         # Match original spectrogram length
         mask = mask[..., :mag.shape[-1]]
-        enhanced = torch.polar(mag * mask, phase)
+        enhanced = _polar(mag * mask, phase)
         return self.stft_proc.istft(enhanced, length=T)
 
 
@@ -235,7 +287,7 @@ class CRMNet(nn.Module):
 
         enhanced_real = X.real * mask_real - X.imag * mask_imag
         enhanced_imag = X.real * mask_imag + X.imag * mask_real
-        enhanced = torch.complex(enhanced_real, enhanced_imag)
+        enhanced = _complex(enhanced_real, enhanced_imag)
 
         return self.stft_proc.istft(enhanced, length=T)
 
@@ -313,7 +365,7 @@ class AttentionMask(nn.Module):
         mask = self.output_proj(h)         # (B, N, F)
         mask = mask.transpose(1, 2)        # (B, F, N)
 
-        enhanced = torch.polar(mag * mask, phase)
+        enhanced = _polar(mag * mask, phase)
         return self.stft_proc.istft(enhanced, length=T)
 
 
@@ -372,7 +424,7 @@ class GatedRecurrent(nn.Module):
         mask = self.post_net(h)           # (B, N, F)
         mask = mask.transpose(1, 2)       # (B, F, N)
 
-        enhanced = torch.polar(mag * mask, phase)
+        enhanced = _polar(mag * mask, phase)
         return self.stft_proc.istft(enhanced, length=T)
 
 
