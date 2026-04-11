@@ -301,17 +301,23 @@ def train(args):
         dataset=args.dataset,
     )
 
-    # Optimizer with warmup + cosine decay
+    # Optimizer
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    warmup_epochs = min(args.warmup_epochs, args.epochs // 4)
 
-    def lr_lambda(epoch):
-        if epoch < warmup_epochs:
-            return (epoch + 1) / max(warmup_epochs, 1)
-        progress = (epoch - warmup_epochs) / max(args.epochs - warmup_epochs, 1)
-        return 0.5 * (1 + math.cos(math.pi * progress))
-
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    # LR scheduler — use constant LR on XLA to avoid graph recompilation.
+    # Each unique LR value creates a new XLA graph (scalar embedded in computation).
+    # On CUDA/CPU/MPS: warmup + cosine decay.
+    if device_type in ("xla", "neuron"):
+        scheduler = None  # constant LR avoids XLA recompilation
+        print(f"[xla] Using constant LR (no scheduler) to avoid graph recompilation")
+    else:
+        warmup_epochs = min(args.warmup_epochs, args.epochs // 4)
+        def lr_lambda(epoch):
+            if epoch < warmup_epochs:
+                return (epoch + 1) / max(warmup_epochs, 1)
+            progress = (epoch - warmup_epochs) / max(args.epochs - warmup_epochs, 1)
+            return 0.5 * (1 + math.cos(math.pi * progress))
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # AMP setup
     use_amp = args.amp and device_type == "cuda"
@@ -330,7 +336,8 @@ def train(args):
     print(f"\n[train] Starting {args.epochs} epochs, batch_size={args.batch_size}")
     loss_desc = "SI-SDR only (XLA)" if device_type in ("xla", "neuron") else "SI-SDR + Multi-Resolution STFT"
     print(f"[train] Loss: {loss_desc}")
-    print(f"[train] LR: {args.lr} (warmup={warmup_epochs} epochs), Run ID: {args.run_id}")
+    warmup_str = f"warmup={warmup_epochs} epochs" if scheduler is not None else "constant (XLA)"
+    print(f"[train] LR: {args.lr} ({warmup_str}), Run ID: {args.run_id}")
     print("-" * 60)
 
     best_loss = float("inf")
@@ -401,7 +408,8 @@ def train(args):
             num_batches += 1
             epoch_samples += batch_size_actual
 
-        scheduler.step()
+        if scheduler is not None:
+            scheduler.step()
         avg_loss = epoch_loss / max(num_batches, 1)
         avg_si_sdr = epoch_si_sdr / max(num_batches, 1)
         elapsed = time.time() - start_time
