@@ -11,7 +11,10 @@ All sources add noise on-the-fly at random SNR levels.
 
 import torch
 import torch.nn.functional as F
-import torchaudio
+try:
+    import torchaudio
+except ImportError:
+    torchaudio = None  # Only needed for AudioFileDataset (WAV/FLAC loading)
 import numpy as np
 import os
 import random
