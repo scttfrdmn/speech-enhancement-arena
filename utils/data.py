@@ -33,44 +33,49 @@ def white_noise(length, device="cpu"):
 
 
 def pink_noise(length, device="cpu"):
-    """Approximate 1/f noise via spectral shaping (vectorized)."""
-    white = torch.randn(length, device=device)
+    """Approximate 1/f noise via spectral shaping (CPU, then transfer)."""
+    # FFT on CPU (not supported on XLA/Trainium), transfer result to device
+    white = torch.randn(length)
     S = torch.fft.rfft(white)
-    freqs = torch.fft.rfftfreq(length, device=device)
+    freqs = torch.fft.rfftfreq(length)
     freqs[0] = 1.0
     S = S / freqs.sqrt()
     S[0] = 0
     pink = torch.fft.irfft(S, n=length)
     pink = pink / (pink.abs().max() + 1e-8)
-    return pink
+    return pink.to(device)
 
 
 def babble_noise(length, num_speakers=6, device="cpu"):
     """Simulated multi-talker babble from overlapping formant signals."""
-    babble = torch.zeros(length, device=device)
+    babble = torch.zeros(length)
     for _ in range(num_speakers):
-        babble += _generate_formant_signal(length, device=device)
-    return babble / num_speakers
+        babble += _generate_formant_signal(length)
+    return (babble / num_speakers).to(device)
 
 
 def _generate_formant_signal(length, sr=16000, device="cpu"):
-    """Generate a single synthetic speech-like signal with formant structure."""
-    t = torch.linspace(0, length / sr, length, device=device)
+    """Generate a single synthetic speech-like signal with formant structure.
+
+    All computation runs on CPU (uses FFT which isn't supported on XLA).
+    Result is transferred to target device at the end.
+    """
+    t = torch.linspace(0, length / sr, length)
 
     f0 = random.uniform(80, 300)
     formants = torch.tensor([
         random.uniform(200, 900),
         random.uniform(800, 2500),
         random.uniform(1800, 3500),
-    ], device=device)
-    bandwidths = torch.tensor([200.0, 300.0, 400.0], device=device)
+    ])
+    bandwidths = torch.tensor([200.0, 300.0, 400.0])
 
-    ks = torch.arange(1, 30, device=device, dtype=torch.float32)
+    ks = torch.arange(1, 30, dtype=torch.float32)
     amps = 1.0 / (ks ** 1.2)
     phases = 2 * np.pi * f0 * ks.unsqueeze(1) * t.unsqueeze(0)
     signal = (amps.unsqueeze(1) * torch.sin(phases)).sum(0)
 
-    freqs = torch.fft.rfftfreq(length, 1/sr, device=device)
+    freqs = torch.fft.rfftfreq(length, 1/sr)
     S = torch.fft.rfft(signal)
     formant_env = torch.zeros_like(freqs)
     for i in range(3):
@@ -82,7 +87,7 @@ def _generate_formant_signal(length, sr=16000, device="cpu"):
     signal = signal * envelope
 
     signal = signal / (signal.abs().max() + 1e-8)
-    return signal
+    return signal.to(device)
 
 
 # ---------------------------------------------------------------------------
@@ -240,23 +245,30 @@ WavFileDataset = AudioFileDataset
 # ---------------------------------------------------------------------------
 
 def _generate_batch_on_device(batch_size, length, sr, snr_range, device):
-    """Generate a full batch of noisy/clean pairs directly on the accelerator."""
-    clean_batch = torch.zeros(batch_size, length, device=device)
+    """Generate a full batch of noisy/clean pairs, transfer to device.
+
+    All generation runs on CPU (FFT ops not supported on XLA/Trainium).
+    Final tensors are transferred to target device in a single bulk transfer.
+    """
+    # Generate clean signals on CPU (formant gen uses FFT)
+    clean_batch = torch.zeros(batch_size, length)
     for b in range(batch_size):
-        clean_batch[b] = _generate_formant_signal(length, sr=sr, device=device)
+        clean_batch[b] = _generate_formant_signal(length, sr=sr)
     clean_batch = clean_batch / (clean_batch.abs().amax(dim=-1, keepdim=True) + 1e-8) * 0.9
 
-    noise = torch.randn(batch_size, length, device=device)
-    pink_mask = torch.rand(batch_size, device=device) > 0.5
+    # Noise on CPU (pink noise uses FFT)
+    noise = torch.randn(batch_size, length)
+    pink_mask = torch.rand(batch_size) > 0.5
     if pink_mask.any():
         S = torch.fft.rfft(noise[pink_mask])
-        freqs = torch.fft.rfftfreq(length, device=device)
+        freqs = torch.fft.rfftfreq(length)
         freqs[0] = 1.0
         S = S / freqs.sqrt()
         S[:, 0] = 0
         noise[pink_mask] = torch.fft.irfft(S, n=length)
 
-    snr_db = torch.empty(batch_size, 1, device=device).uniform_(snr_range[0], snr_range[1])
+    # Mix at random SNR (CPU, cheap arithmetic)
+    snr_db = torch.empty(batch_size, 1).uniform_(snr_range[0], snr_range[1])
     snr_linear = 10 ** (snr_db / 20)
     clean_rms = clean_batch.pow(2).mean(dim=-1, keepdim=True).sqrt()
     noise_rms = noise.pow(2).mean(dim=-1, keepdim=True).sqrt()
@@ -264,7 +276,9 @@ def _generate_batch_on_device(batch_size, length, sr, snr_range, device):
 
     noisy = clean_batch + noise
     peak = noisy.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
-    return noisy / peak, clean_batch / peak
+
+    # Single bulk transfer to device
+    return (noisy / peak).to(device), (clean_batch / peak).to(device)
 
 
 class GPUBatchGenerator:

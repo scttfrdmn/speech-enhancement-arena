@@ -55,19 +55,24 @@ def si_sdr_loss(estimate, target, eps=1e-8):
 
 
 def multi_resolution_stft_loss(estimate, target, fft_sizes=(512, 1024, 2048)):
-    """Multi-resolution STFT loss: spectral convergence + log magnitude."""
+    """Multi-resolution STFT loss: spectral convergence + log magnitude.
+
+    Uses STFTProcessor which auto-selects neuron backend on XLA/Trainium.
+    """
+    from models.architectures import STFTProcessor
+
     loss = 0.0
     for n_fft in fft_sizes:
-        hop = n_fft // 4
-        window = torch.hann_window(n_fft, device=estimate.device)
+        proc = STFTProcessor(n_fft=n_fft)
+        est_spec = proc.stft(estimate)
+        tgt_spec = proc.stft(target)
 
-        est_stft = torch.stft(estimate, n_fft, hop, n_fft, window=window, return_complex=True)
-        tgt_stft = torch.stft(target, n_fft, hop, n_fft, window=window, return_complex=True)
+        est_mag = est_spec.abs()
+        tgt_mag = tgt_spec.abs()
 
-        est_mag = est_stft.abs()
-        tgt_mag = tgt_stft.abs()
-
-        sc = torch.norm(tgt_mag - est_mag, p="fro") / (torch.norm(tgt_mag, p="fro") + 1e-8)
+        # Frobenius norm via manual computation (torch.norm p="fro" may not lower to XLA)
+        diff = tgt_mag - est_mag
+        sc = diff.pow(2).sum().sqrt() / (tgt_mag.pow(2).sum().sqrt() + 1e-8)
         log_mag = nn.functional.l1_loss(
             torch.log(est_mag + 1e-8),
             torch.log(tgt_mag + 1e-8)
