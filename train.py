@@ -344,74 +344,101 @@ def train(args):
     start_time = time.time()
     total_samples = 0
 
+    # Import XLA module once if needed
+    xm = None
+    if device_type in ("xla", "neuron"):
+        try:
+            import torch_xla.core.xla_model as xm
+        except ImportError:
+            pass
+
     for epoch in range(1, args.epochs + 1):
         model.train()
-        epoch_loss = 0.0
-        epoch_si_sdr = 0.0
         num_batches = 0
         epoch_start = time.time()
         epoch_samples = 0
 
-        for batch_idx, (noisy, clean) in enumerate(loader):
-            noisy = noisy.to(device)
-            clean = clean.to(device)
-            batch_size_actual = noisy.shape[0]
+        if device_type in ("xla", "neuron") and xm is not None:
+            # =========================================================
+            # XLA-optimized path: no .item(), no clip_grad_norm_,
+            # no torch.save mid-epoch. All graph-breaking ops deferred
+            # to epoch end.
+            # =========================================================
+            epoch_losses = []
+            epoch_si_sdrs = []
 
-            optimizer.zero_grad()
+            for batch_idx, (noisy, clean) in enumerate(loader):
+                noisy = noisy.to(device)
+                clean = clean.to(device)
+                optimizer.zero_grad()
 
-            if use_amp:
-                with torch.amp.autocast("cuda"):
+                enhanced = model(noisy)
+                loss = combined_loss(enhanced, clean, skip_stft_loss=True)
+                si_sdr_val = -si_sdr_loss(enhanced, clean)
+
+                loss.backward()
+                xm.optimizer_step(optimizer)  # fused step + mark_step
+
+                epoch_losses.append(loss.detach())
+                epoch_si_sdrs.append(si_sdr_val.detach())
+                num_batches += 1
+                epoch_samples += noisy.shape[0]
+
+            # Extract metrics ONCE at epoch end (single graph break)
+            xm.mark_step()
+            avg_loss = torch.stack(epoch_losses).mean().item()
+            avg_si_sdr = torch.stack(epoch_si_sdrs).mean().item()
+
+        else:
+            # =========================================================
+            # Standard path: CUDA / CPU / MPS with AMP support
+            # =========================================================
+            epoch_loss = 0.0
+            epoch_si_sdr = 0.0
+
+            for batch_idx, (noisy, clean) in enumerate(loader):
+                noisy = noisy.to(device)
+                clean = clean.to(device)
+
+                optimizer.zero_grad()
+
+                if use_amp:
+                    with torch.amp.autocast("cuda"):
+                        enhanced = model(noisy)
+                        min_len = min(enhanced.shape[-1], clean.shape[-1])
+                        enhanced = enhanced[..., :min_len]
+                        clean_trimmed = clean[..., :min_len]
+                        loss = combined_loss(enhanced, clean_trimmed)
+
+                    si_sdr_val = -si_sdr_loss(enhanced.float(), clean_trimmed.float())
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
                     enhanced = model(noisy)
                     min_len = min(enhanced.shape[-1], clean.shape[-1])
                     enhanced = enhanced[..., :min_len]
                     clean_trimmed = clean[..., :min_len]
-                    loss = combined_loss(enhanced, clean_trimmed,
-                                         skip_stft_loss=(device_type in ("xla", "neuron")))
+                    loss = combined_loss(enhanced, clean_trimmed)
+                    si_sdr_val = -si_sdr_loss(enhanced, clean_trimmed)
 
-                si_sdr_val = -si_sdr_loss(enhanced.float(), clean_trimmed.float())
-                scaler.scale(loss).backward()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                    optimizer.step()
 
-                if device_type == "xla":
-                    try:
-                        import torch_xla.core.xla_model as xm
-                        xm.mark_step()
-                    except ImportError:
-                        pass
+                epoch_loss += loss.item()
+                epoch_si_sdr += si_sdr_val.item()
+                num_batches += 1
+                epoch_samples += noisy.shape[0]
 
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                enhanced = model(noisy)
-                min_len = min(enhanced.shape[-1], clean.shape[-1])
-                enhanced = enhanced[..., :min_len]
-                clean_trimmed = clean[..., :min_len]
-                loss = combined_loss(enhanced, clean_trimmed,
-                                     skip_stft_loss=(device_type in ("xla", "neuron")))
-                si_sdr_val = -si_sdr_loss(enhanced, clean_trimmed)
-
-                loss.backward()
-
-                if device_type == "xla":
-                    try:
-                        import torch_xla.core.xla_model as xm
-                        xm.mark_step()
-                    except ImportError:
-                        pass
-
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-                optimizer.step()
-
-            epoch_loss += loss.item()
-            epoch_si_sdr += si_sdr_val.item()
-            num_batches += 1
-            epoch_samples += batch_size_actual
+            avg_loss = epoch_loss / max(num_batches, 1)
+            avg_si_sdr = epoch_si_sdr / max(num_batches, 1)
 
         if scheduler is not None:
             scheduler.step()
-        avg_loss = epoch_loss / max(num_batches, 1)
-        avg_si_sdr = epoch_si_sdr / max(num_batches, 1)
+
         elapsed = time.time() - start_time
         epoch_time = time.time() - epoch_start
         lr = optimizer.param_groups[0]["lr"]
@@ -433,7 +460,7 @@ def train(args):
         }
         logger.log(epoch, metrics)
 
-        # Console output with utilization info
+        # Console output
         util_parts = []
         if "gpu_util_pct" in sys_metrics:
             util_parts.append(f"GPU:{sys_metrics['gpu_util_pct']}%")
@@ -454,7 +481,7 @@ def train(args):
         if avg_loss < best_loss:
             best_loss = avg_loss
             ckpt_path = ckpt_dir / f"{args.run_id}_best.pt"
-            torch.save({
+            save_dict = {
                 "epoch": epoch,
                 "model_name": args.model,
                 "scale": args.scale,
@@ -464,7 +491,11 @@ def train(args):
                 "loss": best_loss,
                 "si_sdr": avg_si_sdr,
                 "params": n_params,
-            }, ckpt_path)
+            }
+            if xm is not None:
+                xm.save(save_dict, str(ckpt_path))
+            else:
+                torch.save(save_dict, ckpt_path)
 
     total_time = time.time() - start_time
     avg_throughput = total_samples / max(total_time, 1e-6)

@@ -129,6 +129,11 @@ def _build_env(args, i, mig_uuids):
             env["CUDA_VISIBLE_DEVICES"] = "0"
     elif args.device in ("neuron", "xla"):
         env["NEURON_RT_VISIBLE_CORES"] = str(i)
+        # NEFF compile cache: persist compiled graphs across runs
+        # Set NEURON_COMPILE_CACHE_URL=s3://bucket/path/ for S3 caching
+        cache = os.environ.get("NEURON_COMPILE_CACHE_URL",
+                               str(Path.home() / "neuron_cache"))
+        env["NEURON_COMPILE_CACHE_URL"] = cache
 
     return env
 
