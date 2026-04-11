@@ -26,6 +26,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import math
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -130,6 +131,71 @@ def setup_device(device_str):
 
 
 # ---------------------------------------------------------------------------
+# System metrics collector
+# ---------------------------------------------------------------------------
+
+def collect_system_metrics(device_type):
+    """Collect CPU, system memory, and GPU utilization metrics."""
+    metrics = {}
+
+    # CPU utilization (average over all cores since last call)
+    try:
+        import resource
+        # Load average (1 min) — works on Linux and macOS
+        load1, load5, _ = os.getloadavg()
+        cpu_count = os.cpu_count() or 1
+        metrics["cpu_load_1min"] = round(load1, 2)
+        metrics["cpu_load_pct"] = round(load1 / cpu_count * 100, 1)
+        metrics["cpu_count"] = cpu_count
+    except Exception:
+        pass
+
+    # System memory
+    try:
+        if sys.platform == "linux":
+            with open("/proc/meminfo") as f:
+                meminfo = {}
+                for line in f:
+                    parts = line.split()
+                    meminfo[parts[0].rstrip(":")] = int(parts[1])
+                total = meminfo.get("MemTotal", 0) / 1024  # MB
+                avail = meminfo.get("MemAvailable", 0) / 1024
+                metrics["sys_mem_total_mb"] = round(total, 0)
+                metrics["sys_mem_used_mb"] = round(total - avail, 0)
+                metrics["sys_mem_util_pct"] = round((total - avail) / total * 100, 1) if total > 0 else 0
+        elif sys.platform == "darwin":
+            import subprocess
+            result = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=2)
+            lines = result.stdout.strip().split("\n")
+            page_size = 16384  # Apple Silicon default
+            stats = {}
+            for line in lines[1:]:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    stats[parts[0].strip()] = int(parts[1].strip().rstrip("."))
+            active = stats.get("Pages active", 0) * page_size / 1e6
+            wired = stats.get("Pages wired down", 0) * page_size / 1e6
+            compressed = stats.get("Pages occupied by compressor", 0) * page_size / 1e6
+            metrics["sys_mem_used_mb"] = round(active + wired + compressed, 0)
+    except Exception:
+        pass
+
+    # GPU metrics (CUDA)
+    if device_type == "cuda":
+        try:
+            metrics["gpu_util_pct"] = torch.cuda.utilization(0)
+            metrics["gpu_mem_used_mb"] = round(torch.cuda.memory_allocated(0) / 1e6, 1)
+            props = torch.cuda.get_device_properties(0)
+            total = getattr(props, 'total_memory', getattr(props, 'total_mem', 0))
+            metrics["gpu_mem_total_mb"] = round(total / 1e6, 1)
+            metrics["gpu_mem_peak_mb"] = round(torch.cuda.max_memory_allocated(0) / 1e6, 1)
+        except Exception:
+            pass
+
+    return metrics
+
+
+# ---------------------------------------------------------------------------
 # Metrics logger
 # ---------------------------------------------------------------------------
 
@@ -213,7 +279,6 @@ def train(args):
         progress = (epoch - warmup_epochs) / max(args.epochs - warmup_epochs, 1)
         return 0.5 * (1 + math.cos(math.pi * progress))
 
-    import math
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # AMP setup
@@ -310,6 +375,9 @@ def train(args):
         total_samples += epoch_samples
         samples_per_sec = epoch_samples / max(epoch_time, 1e-6)
 
+        # System & GPU utilization
+        sys_metrics = collect_system_metrics(device_type)
+
         metrics = {
             "loss": round(avg_loss, 4),
             "si_sdr": round(avg_si_sdr, 2),
@@ -318,15 +386,26 @@ def train(args):
             "epoch_time_sec": round(epoch_time, 2),
             "samples_per_sec": round(samples_per_sec, 1),
             "total_samples": total_samples,
+            **sys_metrics,
         }
         logger.log(epoch, metrics)
+
+        # Console output with utilization info
+        util_parts = []
+        if "gpu_util_pct" in sys_metrics:
+            util_parts.append(f"GPU:{sys_metrics['gpu_util_pct']}%")
+        if "gpu_mem_used_mb" in sys_metrics:
+            util_parts.append(f"VRAM:{sys_metrics['gpu_mem_used_mb']:.0f}/{sys_metrics['gpu_mem_total_mb']:.0f}MB")
+        if "cpu_load_pct" in sys_metrics:
+            util_parts.append(f"CPU:{sys_metrics['cpu_load_pct']:.0f}%")
+        util_str = f" | {' '.join(util_parts)}" if util_parts else ""
 
         print(f"  Epoch {epoch:3d}/{args.epochs} | "
               f"Loss: {avg_loss:.4f} | "
               f"SI-SDR: {avg_si_sdr:+.2f} dB | "
               f"LR: {lr:.2e} | "
               f"{samples_per_sec:.0f} samp/s | "
-              f"Time: {elapsed:.0f}s")
+              f"Time: {elapsed:.0f}s{util_str}")
 
         # Checkpoint best
         if avg_loss < best_loss:
@@ -346,14 +425,26 @@ def train(args):
 
     total_time = time.time() - start_time
     avg_throughput = total_samples / max(total_time, 1e-6)
-    logger.log_final({
+    final_sys = collect_system_metrics(device_type)
+    final_metrics = {
         "best_loss": round(best_loss, 4),
         "total_time_sec": round(total_time, 1),
         "params": n_params,
         "total_samples": total_samples,
         "avg_samples_per_sec": round(avg_throughput, 1),
         "scale": args.scale,
-    })
+        **final_sys,
+    }
+    if device_type == "cuda":
+        try:
+            final_metrics["gpu_name"] = torch.cuda.get_device_name(0)
+            peak = final_sys.get("gpu_mem_peak_mb", 0)
+            total = final_sys.get("gpu_mem_total_mb", 1)
+            if total > 0:
+                final_metrics["gpu_mem_utilization_pct"] = round(peak / total * 100, 1)
+        except Exception:
+            pass
+    logger.log_final(final_metrics)
 
     print("-" * 60)
     print(f"[done] {model.name} | Best loss: {best_loss:.4f} | "
