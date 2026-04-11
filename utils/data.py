@@ -1,15 +1,12 @@
 """
-Speech Enhancement Arena — Data Generation
+Speech Enhancement Arena — Data Pipeline
 
-Generates synthetic noisy speech pairs for training without external datasets.
-For the workshop demo, this creates realistic-enough training data that the
-model generalizes to real speech captured from a microphone.
+Supports three data sources:
+  1. Synthetic formant-based speech (GPU-accelerated, no downloads)
+  2. LibriSpeech train-clean-100 (~6GB, 28K utterances, auto-download)
+  3. Custom WAV/FLAC directory (--clean-dir)
 
-Supports:
-  - Synthetic formant-based "speech" (procedural, no files needed)
-  - Loading real .wav files from a directory (for proper training)
-  - Multiple noise types: white, pink, babble, environmental
-  - Configurable SNR range
+All sources add noise on-the-fly at random SNR levels.
 """
 
 import torch
@@ -18,6 +15,8 @@ import torchaudio
 import numpy as np
 import os
 import random
+import subprocess
+import tarfile
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 
@@ -35,10 +34,9 @@ def pink_noise(length, device="cpu"):
     white = torch.randn(length, device=device)
     S = torch.fft.rfft(white)
     freqs = torch.fft.rfftfreq(length, device=device)
-    # 1/f spectral shape, skip DC
     freqs[0] = 1.0
     S = S / freqs.sqrt()
-    S[0] = 0  # zero DC
+    S[0] = 0
     pink = torch.fft.irfft(S, n=length)
     pink = pink / (pink.abs().max() + 1e-8)
     return pink
@@ -53,29 +51,22 @@ def babble_noise(length, num_speakers=6, device="cpu"):
 
 
 def _generate_formant_signal(length, sr=16000, device="cpu"):
-    """Generate a single synthetic speech-like signal with formant structure (vectorized)."""
+    """Generate a single synthetic speech-like signal with formant structure."""
     t = torch.linspace(0, length / sr, length, device=device)
 
-    # Random fundamental frequency (pitch)
-    f0 = random.uniform(80, 300)  # Hz
-
-    # Random formants (vowel-like)
+    f0 = random.uniform(80, 300)
     formants = torch.tensor([
-        random.uniform(200, 900),   # F1
-        random.uniform(800, 2500),  # F2
-        random.uniform(1800, 3500), # F3
+        random.uniform(200, 900),
+        random.uniform(800, 2500),
+        random.uniform(1800, 3500),
     ], device=device)
     bandwidths = torch.tensor([200.0, 300.0, 400.0], device=device)
 
-    # Generate glottal pulse train — vectorized over all harmonics
     ks = torch.arange(1, 30, device=device, dtype=torch.float32)
-    amps = 1.0 / (ks ** 1.2)  # spectral tilt
-    # (harmonics, time) -> sum over harmonics
+    amps = 1.0 / (ks ** 1.2)
     phases = 2 * np.pi * f0 * ks.unsqueeze(1) * t.unsqueeze(0)
     signal = (amps.unsqueeze(1) * torch.sin(phases)).sum(0)
 
-    # Apply formant resonances additively (sum of bandpass filters)
-    # This is more robust than multiplicative — no risk of collapsing to zero
     freqs = torch.fft.rfftfreq(length, 1/sr, device=device)
     S = torch.fft.rfft(signal)
     formant_env = torch.zeros_like(freqs)
@@ -83,25 +74,65 @@ def _generate_formant_signal(length, sr=16000, device="cpu"):
         formant_env = formant_env + torch.exp(-0.5 * ((freqs - formants[i]) / bandwidths[i]) ** 2)
     signal = torch.fft.irfft(S * formant_env, n=length)
 
-    # Random amplitude envelope (syllable-like rhythm)
     envelope_freq = random.uniform(2, 6)
     envelope = 0.5 + 0.5 * torch.sin(2 * np.pi * envelope_freq * t + random.uniform(0, 2*np.pi))
     signal = signal * envelope
 
-    # Normalize
     signal = signal / (signal.abs().max() + 1e-8)
     return signal
 
 
 # ---------------------------------------------------------------------------
-# Dataset
+# LibriSpeech download
+# ---------------------------------------------------------------------------
+
+def download_librispeech(data_dir="/data/librispeech", split="train-clean-100"):
+    """Download LibriSpeech split if not already present. Returns path to audio files."""
+    data_dir = Path(data_dir)
+    audio_dir = data_dir / "LibriSpeech" / split
+
+    if audio_dir.exists() and any(audio_dir.rglob("*.flac")):
+        n_files = sum(1 for _ in audio_dir.rglob("*.flac"))
+        print(f"[data] LibriSpeech {split} already downloaded ({n_files} files)")
+        return str(audio_dir)
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    url = f"https://www.openslr.org/resources/12/{split}.tar.gz"
+    tar_path = data_dir / f"{split}.tar.gz"
+
+    print(f"[data] Downloading LibriSpeech {split} (~6GB)...")
+    print(f"[data] URL: {url}")
+
+    try:
+        subprocess.run(
+            ["wget", "-c", "-q", "--show-progress", "-O", str(tar_path), url],
+            check=True, timeout=1800,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # Fallback to curl
+        subprocess.run(
+            ["curl", "-L", "-C", "-", "-o", str(tar_path), url],
+            check=True, timeout=1800,
+        )
+
+    print(f"[data] Extracting...")
+    with tarfile.open(tar_path, "r:gz") as tar:
+        tar.extractall(path=str(data_dir))
+
+    # Clean up tarball to save disk
+    tar_path.unlink(missing_ok=True)
+
+    n_files = sum(1 for _ in audio_dir.rglob("*.flac"))
+    print(f"[data] LibriSpeech {split} ready ({n_files} files)")
+    return str(audio_dir)
+
+
+# ---------------------------------------------------------------------------
+# Datasets
 # ---------------------------------------------------------------------------
 
 class SyntheticSpeechDataset(Dataset):
-    """
-    Generates on-the-fly noisy/clean speech pairs.
-    No external files needed — perfect for workshop demos.
-    """
+    """On-the-fly synthetic noisy/clean speech pairs."""
 
     def __init__(self, num_samples=5000, duration=1.0, sr=16000,
                  snr_range=(-5, 15), noise_types=None):
@@ -118,7 +149,6 @@ class SyntheticSpeechDataset(Dataset):
         clean = _generate_formant_signal(self.length)
         clean = clean / (clean.abs().max() + 1e-8) * 0.9
 
-        # Random noise type
         noise_type = random.choice(self.noise_types)
         if noise_type == "white":
             noise = white_noise(self.length)
@@ -129,34 +159,31 @@ class SyntheticSpeechDataset(Dataset):
         else:
             noise = white_noise(self.length)
 
-        # Random SNR
         snr_db = random.uniform(*self.snr_range)
         snr_linear = 10 ** (snr_db / 20)
-
         clean_rms = clean.pow(2).mean().sqrt()
         noise_rms = noise.pow(2).mean().sqrt()
         noise = noise * (clean_rms / (noise_rms * snr_linear + 1e-8))
 
         noisy = clean + noise
-        # Normalize to prevent clipping
         peak = max(noisy.abs().max(), 1e-8)
-        noisy = noisy / peak
-        clean = clean / peak
-
-        return noisy, clean
+        return noisy / peak, clean / peak
 
 
-class WavFileDataset(Dataset):
+class AudioFileDataset(Dataset):
     """
-    Loads clean .wav files from a directory and adds noise on-the-fly.
-    Use this with real speech corpora (e.g., VCTK, LibriSpeech).
+    Loads clean speech files (.wav, .flac) from a directory and adds noise on-the-fly.
+    Works with LibriSpeech (FLAC), VCTK (WAV), DNS Challenge, or any speech corpus.
     """
 
-    def __init__(self, clean_dir, duration=1.0, sr=16000,
+    def __init__(self, clean_dir, duration=3.0, sr=16000,
                  snr_range=(-5, 15), noise_types=None):
-        self.files = sorted(Path(clean_dir).glob("**/*.wav"))
+        self.files = sorted(
+            list(Path(clean_dir).rglob("*.wav")) +
+            list(Path(clean_dir).rglob("*.flac"))
+        )
         if not self.files:
-            raise ValueError(f"No .wav files found in {clean_dir}")
+            raise ValueError(f"No .wav or .flac files found in {clean_dir}")
         self.duration = duration
         self.sr = sr
         self.length = int(duration * sr)
@@ -182,7 +209,6 @@ class WavFileDataset(Dataset):
 
         clean = clean / (clean.abs().max() + 1e-8) * 0.9
 
-        # Add noise (same as synthetic)
         noise_type = random.choice(self.noise_types)
         if noise_type == "white":
             noise = white_noise(self.length)
@@ -202,22 +228,22 @@ class WavFileDataset(Dataset):
         return noisy / peak, clean / peak
 
 
+# Keep old name as alias for backward compatibility
+WavFileDataset = AudioFileDataset
+
+
 # ---------------------------------------------------------------------------
 # GPU batch generator — generates entire batches on-device
 # ---------------------------------------------------------------------------
 
 def _generate_batch_on_device(batch_size, length, sr, snr_range, device):
     """Generate a full batch of noisy/clean pairs directly on the accelerator."""
-    t = torch.linspace(0, length / sr, length, device=device)
-
     clean_batch = torch.zeros(batch_size, length, device=device)
     for b in range(batch_size):
         clean_batch[b] = _generate_formant_signal(length, sr=sr, device=device)
     clean_batch = clean_batch / (clean_batch.abs().amax(dim=-1, keepdim=True) + 1e-8) * 0.9
 
-    # Vectorized noise: random mix of white and pink (babble is slow, skip for GPU batches)
     noise = torch.randn(batch_size, length, device=device)
-    # Apply random 1/f shaping to ~half the batch
     pink_mask = torch.rand(batch_size, device=device) > 0.5
     if pink_mask.any():
         S = torch.fft.rfft(noise[pink_mask])
@@ -227,10 +253,8 @@ def _generate_batch_on_device(batch_size, length, sr, snr_range, device):
         S[:, 0] = 0
         noise[pink_mask] = torch.fft.irfft(S, n=length)
 
-    # Random SNR per sample
     snr_db = torch.empty(batch_size, 1, device=device).uniform_(snr_range[0], snr_range[1])
     snr_linear = 10 ** (snr_db / 20)
-
     clean_rms = clean_batch.pow(2).mean(dim=-1, keepdim=True).sqrt()
     noise_rms = noise.pow(2).mean(dim=-1, keepdim=True).sqrt()
     noise = noise * (clean_rms / (noise_rms * snr_linear + 1e-8))
@@ -272,16 +296,30 @@ class GPUBatchGenerator:
 
 def make_dataloader(clean_dir=None, batch_size=32, num_workers=4,
                     device="cpu", **kwargs):
-    """Create a dataloader — GPU generator for synthetic, DataLoader for files."""
+    """Create a dataloader.
+
+    - If clean_dir is provided: uses AudioFileDataset with DataLoader
+    - If dataset="librispeech": downloads and uses LibriSpeech train-clean-100
+    - Otherwise: GPU batch generator for synthetic data
+    """
+    dataset_name = kwargs.pop("dataset", None)
+
+    # LibriSpeech auto-download
+    if dataset_name == "librispeech" and not clean_dir:
+        clean_dir = download_librispeech()
+
     if clean_dir and Path(clean_dir).exists():
-        dataset = WavFileDataset(clean_dir, **kwargs)
-        print(f"[data] Loaded {len(dataset)} wav files from {clean_dir}")
+        duration = kwargs.get("duration", 3.0)
+        sr = kwargs.get("sr", 16000)
+        snr_range = kwargs.get("snr_range", (-5, 15))
+        dataset = AudioFileDataset(clean_dir, duration=duration, sr=sr,
+                                   snr_range=snr_range)
+        print(f"[data] {len(dataset)} audio files from {clean_dir}")
         return DataLoader(
             dataset, batch_size=batch_size, shuffle=True,
             num_workers=num_workers, pin_memory=True, drop_last=True,
         )
     else:
-        # Use GPU batch generator for synthetic data
         num_samples = kwargs.get("num_samples", 5000)
         duration = kwargs.get("duration", 1.0)
         sr = kwargs.get("sr", 16000)
@@ -297,7 +335,6 @@ def make_dataloader(clean_dir=None, batch_size=32, num_workers=4,
 
 
 if __name__ == "__main__":
-    # Quick test
     ds = SyntheticSpeechDataset(num_samples=10)
     noisy, clean = ds[0]
     print(f"Noisy: {noisy.shape}, Clean: {clean.shape}")

@@ -94,18 +94,27 @@ def _build_train_cmd(args, model_name, run_id, log_dir, ckpt_dir):
         "--model", model_name,
         "--run-id", run_id,
         "--device", args.device,
+        "--scale", args.scale,
         "--epochs", str(args.epochs),
         "--batch-size", str(args.batch_size),
         "--lr", str(args.lr),
         "--num-samples", str(args.num_samples),
+        "--duration", str(args.duration),
         "--log-dir", str(log_dir),
         "--checkpoint-dir", str(ckpt_dir),
         "--num-workers", str(args.num_workers),
+        "--warmup-epochs", str(args.warmup_epochs),
     ]
+    if args.n_fft:
+        cmd.extend(["--n-fft", str(args.n_fft)])
     if args.clean_dir:
         cmd.extend(["--clean-dir", args.clean_dir])
+    if args.dataset:
+        cmd.extend(["--dataset", args.dataset])
     if args.compile:
         cmd.append("--compile")
+    if args.amp:
+        cmd.append("--amp")
     return cmd
 
 
@@ -389,14 +398,30 @@ def main():
     parser = argparse.ArgumentParser(description="Speech Enhancement Arena")
     parser.add_argument("--device", type=str, default="cuda",
                         choices=["cuda", "mps", "neuron", "xla", "cpu"])
-    parser.add_argument("--compile", action="store_true",
-                        help="Pass --compile to each training process (torch.compile)")
+    parser.add_argument("--scale", type=str, default="small",
+                        choices=["small", "large"],
+                        help="Model scale: small (1-5M) or large (20-50M)")
+    parser.add_argument("--n-fft", type=int, default=None,
+                        help="Override STFT FFT size")
+    parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--amp", action="store_true",
+                        help="Enable mixed precision training")
+
+    # Training
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--warmup-epochs", type=int, default=3)
     parser.add_argument("--num-samples", type=int, default=5000)
+    parser.add_argument("--duration", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=2)
+
+    # Data
+    parser.add_argument("--dataset", type=str, default=None,
+                        choices=["librispeech"])
     parser.add_argument("--clean-dir", type=str, default=None)
+
+    # Output
     parser.add_argument("--log-dir", type=str, default="logs")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     args = parser.parse_args()
