@@ -35,6 +35,15 @@ except ImportError:
     _HAS_NEURON_COMPLEX = False
 
 
+def _is_xla_device(device):
+    """Check if a device is XLA (Trainium/TPU)."""
+    if device is None:
+        return False
+    if isinstance(device, torch.device):
+        return device.type == "xla"
+    return "xla" in str(device)
+
+
 class STFTProcessor:
     """Shared STFT/iSTFT logic with pluggable backend.
 
@@ -54,10 +63,7 @@ class STFTProcessor:
             return True
         if self.backend == "native":
             return False
-        # auto: use neuron if available and on XLA device
-        if _HAS_NEURON_COMPLEX and device is not None:
-            return "xla" in str(device)
-        return False
+        return _HAS_NEURON_COMPLEX and _is_xla_device(device)
 
     def stft(self, x):
         """x: (B, T) -> complex spectrogram (B, F, N)
@@ -77,7 +83,8 @@ class STFTProcessor:
 
     def istft(self, X, length=None):
         """X: complex (B, F, N) or ComplexTensor -> (B, T)"""
-        if self._use_neuron(X.real.device if hasattr(X, 'real') and isinstance(X.real, torch.Tensor) else None):
+        device = X.real.device if hasattr(X, 'real') else getattr(X, 'device', None)
+        if self._use_neuron(device):
             return real_istft(X, self.n_fft, self.hop_length, length=length)
         else:
             window = torch.hann_window(self.win_length, device=X.device)
@@ -89,18 +96,15 @@ class STFTProcessor:
 
 def _polar(mag, phase):
     """Create complex from magnitude and phase — works with both backends."""
-    if _HAS_NEURON_COMPLEX and isinstance(mag, torch.Tensor):
-        # Check if we should use ComplexTensor (when on XLA/Trainium)
-        if "xla" in str(mag.device):
-            return ComplexTensor.from_polar(mag, phase)
+    if _HAS_NEURON_COMPLEX and _is_xla_device(mag.device):
+        return ComplexTensor.from_polar(mag, phase)
     return torch.polar(mag, phase)
 
 
 def _complex(real, imag):
     """Create complex from real and imag — works with both backends."""
-    if _HAS_NEURON_COMPLEX and isinstance(real, torch.Tensor):
-        if "xla" in str(real.device):
-            return ComplexTensor(real, imag)
+    if _HAS_NEURON_COMPLEX and _is_xla_device(real.device):
+        return ComplexTensor(real, imag)
     return torch.complex(real, imag)
 
 
