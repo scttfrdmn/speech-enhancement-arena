@@ -82,9 +82,17 @@ def multi_resolution_stft_loss(estimate, target, fft_sizes=(512, 1024, 2048)):
     return loss / len(fft_sizes)
 
 
-def combined_loss(estimate, target):
-    """SI-SDR + multi-resolution STFT."""
-    return si_sdr_loss(estimate, target) + 0.5 * multi_resolution_stft_loss(estimate, target)
+def combined_loss(estimate, target, skip_stft_loss=False):
+    """SI-SDR + multi-resolution STFT.
+
+    On XLA/Trainium, the multi-resolution STFT loss generates a graph too large
+    for the Neuron compiler (88K+ instructions). Use skip_stft_loss=True to fall
+    back to SI-SDR only.
+    """
+    si_sdr = si_sdr_loss(estimate, target)
+    if skip_stft_loss:
+        return si_sdr
+    return si_sdr + 0.5 * multi_resolution_stft_loss(estimate, target)
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +328,8 @@ def train(args):
 
     # Training
     print(f"\n[train] Starting {args.epochs} epochs, batch_size={args.batch_size}")
-    print(f"[train] Loss: SI-SDR + Multi-Resolution STFT")
+    loss_desc = "SI-SDR only (XLA)" if device_type in ("xla", "neuron") else "SI-SDR + Multi-Resolution STFT"
+    print(f"[train] Loss: {loss_desc}")
     print(f"[train] LR: {args.lr} (warmup={warmup_epochs} epochs), Run ID: {args.run_id}")
     print("-" * 60)
 
@@ -349,7 +358,8 @@ def train(args):
                     min_len = min(enhanced.shape[-1], clean.shape[-1])
                     enhanced = enhanced[..., :min_len]
                     clean_trimmed = clean[..., :min_len]
-                    loss = combined_loss(enhanced, clean_trimmed)
+                    loss = combined_loss(enhanced, clean_trimmed,
+                                         skip_stft_loss=(device_type in ("xla", "neuron")))
 
                 si_sdr_val = -si_sdr_loss(enhanced.float(), clean_trimmed.float())
                 scaler.scale(loss).backward()
@@ -370,7 +380,8 @@ def train(args):
                 min_len = min(enhanced.shape[-1], clean.shape[-1])
                 enhanced = enhanced[..., :min_len]
                 clean_trimmed = clean[..., :min_len]
-                loss = combined_loss(enhanced, clean_trimmed)
+                loss = combined_loss(enhanced, clean_trimmed,
+                                     skip_stft_loss=(device_type in ("xla", "neuron")))
                 si_sdr_val = -si_sdr_loss(enhanced, clean_trimmed)
 
                 loss.backward()
