@@ -401,11 +401,13 @@ class GatedRecurrent(nn.Module):
             nn.PReLU(),
         )
 
-        self.gru = nn.GRU(
+        gru_kwargs = dict(
             input_size=hidden, hidden_size=hidden,
             num_layers=num_layers, batch_first=True,
-            bidirectional=True, dropout=0.1 if num_layers > 1 else 0,
+            dropout=0.1 if num_layers > 1 else 0,
         )
+        self.gru_fwd = nn.GRU(bidirectional=False, **gru_kwargs)
+        self.gru_rev = nn.GRU(bidirectional=False, **gru_kwargs)
 
         # Post-net: refine GRU output
         self.post_net = nn.Sequential(
@@ -424,7 +426,9 @@ class GatedRecurrent(nn.Module):
 
         h = self.pre_net(mag)             # (B, hidden, N)
         h = h.transpose(1, 2)            # (B, N, hidden)
-        h, _ = self.gru(h)               # (B, N, 2*hidden)
+        h_fwd, _ = self.gru_fwd(h)
+        h_rev, _ = self.gru_rev(torch.flip(h, dims=[1]))
+        h = torch.cat([h_fwd, torch.flip(h_rev, dims=[1])], dim=-1)
         mask = self.post_net(h)           # (B, N, F)
         mask = mask.transpose(1, 2)       # (B, F, N)
 
