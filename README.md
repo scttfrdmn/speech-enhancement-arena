@@ -79,6 +79,9 @@ python serve.py --checkpoint-dir checkpoints --device cuda
 
 ## AWS Trainium — TorchNeuron Native (Recommended)
 
+> **Before you launch on Trainium**, read [TRAINIUM_NOTES.md](TRAINIUM_NOTES.md) — compile gotchas we hit the hard way (required env vars, host-RAM minimums, BiGRU refactor, S3 NEFF cache).
+
+
 ```bash
 # On a trn1.2xlarge or trn1.32xlarge with Neuron DLAMI (SDK 2.28+)
 
