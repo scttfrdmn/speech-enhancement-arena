@@ -1,6 +1,6 @@
 # Speech Enhancement Arena — Benchmark Results & Analysis
 
-**Date:** April 11, 2026
+**Date:** April 11–12, 2026
 **Models:** 4 architectures (20-50M params), STFT-domain speech enhancement
 **Config:** 30 epochs, 5K synthetic samples, 3-second audio, batch_size=16, AMP (CUDA), n_fft=1024
 
@@ -19,6 +19,7 @@
 | **g5.xlarge** (AWS) | A10G | 24GB | — | 2 | $1.21 | $0.48 |
 | **M4 Pro** (orion, local) | Apple MPS | Unified 48GB | Apple M4 Pro | 14 | $0.80 amortized | — |
 | **trn1.2xlarge** (AWS) | Trainium1 | 32GB | — | 4 | $1.34 | $0.54 |
+| **trn1.32xlarge** (AWS) | Trainium1 ×16 | 512GB | — | 64 | $21.50 | ~$8.60 |
 
 ---
 
@@ -39,14 +40,17 @@ All models operate in the STFT domain with n_fft=1024, estimate masks, and recon
 
 ConvMaskNet consistently wins across all hardware. Model quality is hardware-independent (as expected — same math, different speed).
 
-| Model | RTX 5090 | g7e Full | g7e MIG | L40S | L4 | A10G |
-|---|---|---|---|---|---|---|
-| ConvMask | -19.51 | -19.39 | -19.40 | -19.34 | -19.52 | -19.31 |
-| CRM | -18.01 | -18.14 | -17.96 | -17.78 | -17.81 | -17.90 |
-| Attention | -15.02 | -6.59* | -10.77* | -10.12* | -12.69 | -7.05* |
-| GRU | -19.04 | -18.68 | -19.07 | -18.67 | -18.71 | -18.96 |
+| Model | RTX 5090 | g7e Full | g7e MIG | L40S | L4 | A10G | M4 Pro (Orion)† | trn1 (XLA) |
+|---|---|---|---|---|---|---|---|---|
+| ConvMask | -19.51 | -19.39 | -19.40 | -19.34 | -19.52 | -19.31 | **-19.41** | -11.84 / -12.22‡ |
+| CRM | -18.01 | -18.14 | -17.96 | -17.78 | -17.81 | -17.90 | **-18.24** | 2.87 / -3.19‡ |
+| Attention | -15.02 | -6.59* | -10.77* | -10.12* | -12.69 | -7.05* | **-13.01** | -12.07 / -12.16‡ |
+| GRU | -19.04 | -18.68 | -19.07 | -18.67 | -18.71 | -18.96 | **-18.86** | -10.05§ |
 
 *Attention model convergence varied across runs — likely AMP precision sensitivity on certain hardware, not a hardware defect.
+†M4 Pro ran large-scale (`--scale large --epochs 30 --num-samples 5000 --duration 3.0`); all others ran small-scale. Direct loss comparison not apples-to-apples across scales.
+‡trn1 ran `--scale small --epochs 5 --num-samples 256`; two columns are first-run/cached-rerun. Different sample counts and epoch budgets vs. other hardware — numbers show convergence trajectory, not final quality.
+§Standalone gru test on trn1 (`--num-samples 64 --epochs 5`, best of 5 epochs).
 
 ---
 
@@ -128,22 +132,37 @@ Same Blackwell architecture, same 600W TDP, but consumer card is 1.6-2x faster:
 
 ---
 
-## 7. Trainium Compatibility
+## 7. Trainium Compatibility (Updated 2026-04-12)
 
-**STFT-domain speech enhancement is incompatible with Trainium.**
+**STFT-domain speech enhancement now runs on AWS Trainium.** Prior assessment of "incompatible" is obsolete.
 
-The Neuron compiler (NCC) does not support complex data types:
-```
-[ERROR] [NCC_EVRF004] Complex data types are not supported but found to be used 
-with operator multiply.
-```
+### What made it work
 
-Both the data generation (`torch.fft.rfft/irfft`) and the model forward pass (`torch.stft/istft`, `torch.polar`) use complex tensors. This is fundamental to STFT-domain processing.
+1. **`neuron-complex-ops`** (github.com/scttfrdmn/neuron-complex-ops) — real-valued STFT/iSTFT via explicit DFT matrix multiply. Avoids `torch.fft.*` and complex tensors entirely. Portable across CPU, CUDA, XLA/Trainium. *(Now incorporated into `trnfft`, part of the [trnsci](https://github.com/trnsci) scientific computing suite for Trainium — future arena versions will import from `trnfft` directly.)*
+2. **XLA-optimized training loop** — removed `.item()` per batch, dropped `clip_grad_norm_`, used `xm.optimizer_step()`, constant LR (no scheduler), skipped multi-resolution STFT loss on XLA. Dropped recompilations from 20+ per run to **2–3 per model**.
+3. **NEFF compile cache** via `NEURON_COMPILE_CACHE_URL` → S3 (`s3://aws-arena-neuron-cache-scttfrdmn/trn1-xla/`). First compile is slow (minutes to hours); cached reruns are near-instant.
+4. **Uni-GRU refactor** — replaced `nn.GRU(bidirectional=True)` with two stacked unidirectional GRUs + `torch.flip`. `torch-neuronx`'s scan-based optimization only supports unidirectional; bidirectional triggers dynamic-shape graph explosion.
 
-**Workarounds under investigation:**
-- Real-valued STFT decomposition (separate real/imag channels)
-- Custom NKI kernels for STFT/iSTFT on Trn2
-- Time-domain model architectures (Conv-TasNet style) that avoid complex ops entirely
+### Results: trn1.32xlarge (4 NeuronCores, parallel arena)
+
+| Phase | Wall Time | Notes |
+|---|---|---|
+| First run (cold cache, 4 models) | ~50 min | gru compile did not finish (killed at 50 min); 3 others: ConvMask -11.84, CRM 2.87, Attention -12.07 |
+| Cached rerun (3 models) | **123s** | 24× speedup; ConvMask -12.22, CRM -3.19, Attention -12.16 |
+| Standalone gru (cold) | ~3 h | Best loss -10.05 SI-SDR +10.05 dB; 10 NEFFs cached |
+| Standalone gru (cached epochs 3–5) | **~2 s/epoch** | Per-epoch steady-state ~31.7 samp/s |
+
+### Caveats
+
+- **trn1.2xlarge (32GB host RAM) cannot compile** the arena models — `neuronx-cc` OOMs mid-Tensorizer. Use trn1.32xlarge (512GB) or trn2.48xlarge (384GB) minimum for first-compile; trn1.2xlarge is fine for cached inference/training.
+- **gru is expensive to compile on Trainium.** Uni-GRU refactor reduced graph explosion, but single-threaded walrus_driver still took 2–4 hours per unique graph. With S3-cached NEFFs this is a one-time cost.
+- **Optimizer-state init graph is not shared** between standalone `train.py` and arena-launched `train.py` — the first fully-cached 4-model arena hit one new gru graph that was still compiling when we terminated. Workaround: seed the cache via a full arena run once, not via individual train.py invocations.
+- **trn2.48xlarge** was attempted in all 3 us-east-2 AZs on 2026-04-11 and hit `InsufficientInstanceCapacity` both times. Next-gen architecture comparison deferred.
+
+### Effective cost on Trainium
+
+- trn1.32xlarge: $21.50/hr OD — expensive per hour, but **$0.73 per cached 3-model arena run** (123s). Competitive with L4 Spot once cache is primed.
+- First-compile cost on trn1.32xlarge for our 4 models: ~$20–30 of compute once, then amortized across every subsequent run via S3 cache.
 
 ---
 
@@ -306,7 +325,7 @@ You **cannot** horizontally scale local GPU systems without upgrading electrical
 - Don't run 1.5GB-VRAM models on 80GB A100s at OSC (96% VRAM waste)
 - Don't optimize for $/GPU-hr (optimize for $/result)
 - Don't treat student time as free (it costs $52/hr fully loaded)
-- Don't try Trainium for STFT-domain work (complex ops not supported — yet)
+- Trainium now works for STFT-domain via `trnfft`/`neuron-complex-ops`, but is a niche fit: use it when you have a persistent cached workload and can amortize the slow first-compile. For one-off experiments it's not competitive with L4 Spot.
 
 ---
 
@@ -328,6 +347,8 @@ You **cannot** horizontally scale local GPU systems without upgrading electrical
 | g6.xlarge | 1x L4 | 24GB | 4 | $0.98 | $0.39 |
 | g5.xlarge | 1x A10G | 24GB | 4 | $1.21 | $0.48 |
 | trn1.2xlarge | 1x Trainium1 | 32GB | 8 | $1.34 | $0.54 |
+| trn1.32xlarge | 16x Trainium1 | 512GB | 128 | $21.50 | ~$8.60 |
+| trn2.48xlarge | 16x Trainium2 | 384GB | 192 | ~$16.00 | — |
 | g6e.xlarge | 1x L40S | 48GB | 4 | $1.86 | $0.75 |
 | g7e.2xlarge | 1x RTX PRO 6000 | 96GB | 8 | $3.36 | ~$1.35 |
 | g7e.8xlarge | 1x RTX PRO 6000 | 96GB | 32 | ~$8.15 | — |

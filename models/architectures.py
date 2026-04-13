@@ -27,12 +27,14 @@ import math
 # Shared STFT front-end / back-end
 # ---------------------------------------------------------------------------
 
-# Try to import neuron-complex-ops for Trainium-compatible STFT
+# trnfft provides Trainium-compatible STFT + ComplexTensor
+# (trnfft incorporates neuron-complex-ops; see https://github.com/trnsci/trnfft)
 try:
-    from neuron_complex import ComplexTensor, real_stft, real_istft
-    _HAS_NEURON_COMPLEX = True
+    import trnfft
+    from trnfft import ComplexTensor
+    _HAS_TRNFFT = True
 except ImportError:
-    _HAS_NEURON_COMPLEX = False
+    _HAS_TRNFFT = False
 
 
 def _is_xla_device(device):
@@ -48,62 +50,63 @@ class STFTProcessor:
     """Shared STFT/iSTFT logic with pluggable backend.
 
     backend="native": uses torch.stft/istft (requires complex tensor support — CUDA, CPU, MPS)
-    backend="neuron":  uses neuron-complex-ops real_stft/real_istft (works on Trainium)
-    backend="auto":    uses neuron backend if available and device is xla, else native
+    backend="trnfft": uses trnfft.stft/istft (works on Trainium; split real/imag)
+    backend="auto":   uses trnfft backend if available and device is xla, else native
     """
 
     def __init__(self, n_fft=512, hop_length=None, win_length=None, backend="auto"):
         self.n_fft = n_fft
         self.hop_length = hop_length or n_fft // 4
         self.win_length = win_length or n_fft
+        if backend == "neuron":
+            backend = "trnfft"
         self.backend = backend
 
-    def _use_neuron(self, device=None):
-        if self.backend == "neuron":
+    def _use_trnfft(self, device=None):
+        if self.backend == "trnfft":
             return True
         if self.backend == "native":
             return False
-        return _HAS_NEURON_COMPLEX and _is_xla_device(device)
+        return _HAS_TRNFFT and _is_xla_device(device)
 
     def stft(self, x):
         """x: (B, T) -> complex spectrogram (B, F, N)
 
-        Returns torch complex tensor (native) or ComplexTensor (neuron).
+        Returns torch complex tensor (native) or ComplexTensor (trnfft).
         Models should use .abs(), .angle(), .real, .imag which work on both.
         """
-        if self._use_neuron(x.device):
-            window = torch.hann_window(self.win_length, device=x.device)
-            return real_stft(x, self.n_fft, self.hop_length, window=window)
-        else:
-            window = torch.hann_window(self.win_length, device=x.device)
-            return torch.stft(
-                x, self.n_fft, self.hop_length, self.win_length,
-                window=window, return_complex=True
-            )
+        window = torch.hann_window(self.win_length, device=x.device)
+        if self._use_trnfft(x.device):
+            return trnfft.stft(x, n_fft=self.n_fft, hop_length=self.hop_length,
+                               win_length=self.win_length, window=window)
+        return torch.stft(
+            x, self.n_fft, self.hop_length, self.win_length,
+            window=window, return_complex=True,
+        )
 
     def istft(self, X, length=None):
         """X: complex (B, F, N) or ComplexTensor -> (B, T)"""
         device = X.real.device if hasattr(X, 'real') else getattr(X, 'device', None)
-        if self._use_neuron(device):
-            return real_istft(X, self.n_fft, self.hop_length, length=length)
-        else:
-            window = torch.hann_window(self.win_length, device=X.device)
-            return torch.istft(
-                X, self.n_fft, self.hop_length, self.win_length,
-                window=window, length=length
-            )
+        window = torch.hann_window(self.win_length, device=device)
+        if self._use_trnfft(device):
+            return trnfft.istft(X, n_fft=self.n_fft, hop_length=self.hop_length,
+                                win_length=self.win_length, window=window, length=length)
+        return torch.istft(
+            X, self.n_fft, self.hop_length, self.win_length,
+            window=window, length=length,
+        )
 
 
 def _polar(mag, phase):
     """Create complex from magnitude and phase — works with both backends."""
-    if _HAS_NEURON_COMPLEX and _is_xla_device(mag.device):
+    if _HAS_TRNFFT and _is_xla_device(mag.device):
         return ComplexTensor.from_polar(mag, phase)
     return torch.polar(mag, phase)
 
 
 def _complex(real, imag):
     """Create complex from real and imag — works with both backends."""
-    if _HAS_NEURON_COMPLEX and _is_xla_device(real.device):
+    if _HAS_TRNFFT and _is_xla_device(real.device):
         return ComplexTensor(real, imag)
     return torch.complex(real, imag)
 

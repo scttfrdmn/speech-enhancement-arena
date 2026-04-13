@@ -83,10 +83,14 @@ python serve.py --checkpoint-dir checkpoints --device cuda
 # On a trn1.2xlarge or trn1.32xlarge with Neuron DLAMI (SDK 2.28+)
 
 # 1. Activate Neuron environment
-source /opt/aws_neuronx_venv_pytorch/bin/activate
+source /opt/aws_neuronx_venv_pytorch_2_9/bin/activate
 
-# 2. Install additional deps
+# 2. Install deps — including trnfft for Trainium-compatible STFT/complex ops
 pip install -r requirements.txt
+pip install "trnfft[neuron]"   # or: pip install git+https://github.com/trnsci/trnfft.git
+
+# Optional: persist compiled NEFFs to S3 across instances
+export NEURON_COMPILE_CACHE_URL=s3://your-bucket/neuron-cache/
 
 # 3. Launch arena on NeuronCores (eager mode)
 python arena.py --device neuron --epochs 30

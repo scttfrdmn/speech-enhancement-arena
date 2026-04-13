@@ -1,0 +1,36 @@
+{
+  "results": [
+    {
+      "model": "conv_mask",
+      "description": "Conv Encoder-Decoder (Magnitude Mask)",
+      "best_loss": -12.2244,
+      "total_time": 62.9,
+      "params": 4990985,
+      "exit_code": 0,
+      "wall_time": 123.01843357086182
+    },
+    {
+      "model": "attention",
+      "description": "Multi-Head Attention Mask (SWIM-inspired)",
+      "best_loss": -12.1603,
+      "total_time": 108.4,
+      "params": 3554308,
+      "exit_code": 0,
+      "wall_time": 123.01843357086182
+    },
+    {
+      "model": "crm",
+      "description": "Complex Ratio Mask (Williamson & Wang 2017)",
+      "best_loss": -3.1891,
+      "total_time": 98.7,
+      "params": 2764939,
+      "exit_code": 0,
+      "wall_time": 123.01843357086182
+    }
+  ],
+  "total_time_sec": 270.0,
+  "wall_time_sec": 123.01843357086182,
+  "device": "xla",
+  "epochs": 5,
+  "mode": "parallel"
+}
