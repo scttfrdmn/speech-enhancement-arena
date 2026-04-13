@@ -1,0 +1,45 @@
+{
+  "results": [
+    {
+      "model": "attention",
+      "description": "Multi-Head Attention Mask (SWIM-inspired)",
+      "best_loss": -10.0779,
+      "total_time": 72.4,
+      "params": 3554308,
+      "exit_code": 0,
+      "wall_time": 93.0229880809784
+    },
+    {
+      "model": "gru",
+      "description": "Bidirectional GRU Mask (Nayem & Williamson)",
+      "best_loss": -8.5057,
+      "total_time": 73.2,
+      "params": 2565124,
+      "exit_code": 0,
+      "wall_time": 93.0229880809784
+    },
+    {
+      "model": "conv_mask",
+      "description": "Conv Encoder-Decoder (Magnitude Mask)",
+      "best_loss": -8.1002,
+      "total_time": 72.3,
+      "params": 4990985,
+      "exit_code": 0,
+      "wall_time": 93.0229880809784
+    },
+    {
+      "model": "crm",
+      "description": "Complex Ratio Mask (Williamson & Wang 2017)",
+      "best_loss": -4.0072,
+      "total_time": 72.7,
+      "params": 2764939,
+      "exit_code": 0,
+      "wall_time": 93.0229880809784
+    }
+  ],
+  "total_time_sec": 290.6,
+  "wall_time_sec": 93.0229880809784,
+  "device": "cuda",
+  "epochs": 5,
+  "mode": "parallel"
+}

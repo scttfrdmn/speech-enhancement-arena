@@ -12,6 +12,5 @@ python-multipart
 matplotlib
 
 # For Trainium (install separately on Trn instances):
-# torch-neuronx  (via Neuron SDK)
-# OR
-# torch-xla  (via older Neuron SDK)
+#   torch-neuronx, torch-xla, libneuronxla  (via Neuron SDK DLAMI)
+#   pip install "trnfft[neuron]"            (FFT/complex ops via NKI)
