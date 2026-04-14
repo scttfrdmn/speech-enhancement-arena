@@ -58,6 +58,20 @@ NKI kernel outputs carry no `grad_fn`. Forward works, `loss.backward()` raises `
 
 **Long-term fix:** wrap each `@nki.jit` kernel in a `torch.autograd.Function` with analytic backward.
 
+### 9a. Cross-compile on cheap x86, not Trn
+
+`neuronx-cc` is a cross-compiler — it needs the Neuron SDK installed but **no Neuron accelerator** on the host. Works on any x86_64 with the Neuron DLAMI. Verified on `r7i.24xlarge` (768 GB RAM, $6.36/hr): neuronx-cc ran at the same speed as on `trn1.32xlarge` ($21.50/hr, same single-threaded `walrus_driver`). Use `--target=trn1` (or trn1n/inf2) to select the ISA.
+
+Canonical cache-seeding pipeline:
+
+1. `trn1.2xlarge` ($1.34/hr) — run `train.py` briefly to emit HLO `.pb` files into `/tmp/ubuntu/neuroncc_compile_workdir/*/`. Kill once the `.pb` files appear (seconds).
+2. scp HLOs off.
+3. `r7i.24xlarge` — bulk-compile with `neuronx-cc compile --framework=XLA model.hlo_module.pb --output model.neff --target=trn1 --optlevel 1`.
+4. Upload NEFFs into the S3 cache path (`neuronxcc-<ver>/MODULE_<hash>/model.neff`).
+5. Downstream consumers hit cache, zero compile.
+
+This collapses the "$300 of trn1.32xlarge compile" to "$30 of r7i.24xlarge compile" for the same output.
+
 ### 9. NEFF cache is the single biggest win
 
 - First compile: minutes to hours per unique graph.
