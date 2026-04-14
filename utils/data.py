@@ -15,6 +15,15 @@ try:
     import torchaudio
 except ImportError:
     torchaudio = None  # Only needed for AudioFileDataset (WAV/FLAC loading)
+
+# soundfile is a lightweight portable audio decoder (libsndfile).
+# Preferred over torchaudio.load() because torchaudio 2.9+ delegates to
+# torchcodec which requires ffmpeg libavutil at runtime — brittle on macOS
+# without brew ffmpeg@4.
+try:
+    import soundfile as sf
+except ImportError:
+    sf = None
 import numpy as np
 import os
 import random
@@ -202,8 +211,13 @@ class AudioFileDataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        wav, orig_sr = torchaudio.load(self.files[idx])
-        wav = wav[0]  # mono
+        if sf is not None:
+            data, orig_sr = sf.read(str(self.files[idx]), dtype="float32",
+                                    always_2d=True)
+            wav = torch.from_numpy(data[:, 0])  # take channel 0 → mono
+        else:
+            wav, orig_sr = torchaudio.load(str(self.files[idx]))
+            wav = wav[0]
 
         if orig_sr != self.sr:
             wav = torchaudio.functional.resample(wav, orig_sr, self.sr)
