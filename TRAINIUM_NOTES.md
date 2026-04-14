@@ -69,7 +69,15 @@ export NEURON_COMPILE_CACHE_URL=s3://your-bucket/trn1-xla/
 
 Arena's seed cache: `s3://aws-arena-neuron-cache-scttfrdmn/trn1-xla/` (509 MB, 43 NEFFs covering all 4 models). Downstream users hit S3 and get compile-free runs.
 
-### 10. If compile looks stuck, check the latest compile log
+### 10. trn2.* is Capacity-Blocks-for-ML only
+
+All trn2 instance sizes (`trn2.3xlarge`, `trn2.48xlarge`, etc.) are **reservation-only** via [Capacity Blocks for ML](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html). `aws ec2 run-instances` without a CBML reservation will always return `InsufficientInstanceCapacity`, and `describe-instance-types` hides the sizes you don't have a reservation for (looks like they don't exist).
+
+- Reserve a Capacity Block for a future window; `aws ec2 create-capacity-reservation-fleet` or Console.
+- Launch during the reserved window with `--market-type capacity-block --capacity-reservation-specification CapacityReservationTarget=...`.
+- Plan any trn2 benchmark **days in advance**. You can't just launch one ad hoc like with trn1.
+
+### 11. If compile looks stuck, check the latest compile log
 
 ```bash
 ls -t /tmp/ubuntu/neuroncc_compile_workdir/*/log-neuron-cc.txt | head -1 | xargs tail
