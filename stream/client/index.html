@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Streaming Arena — Echo</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { margin-top: 0; }
+  .row { display: flex; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
+  .row label { min-width: 180px; }
+  button { padding: 0.6rem 1.2rem; font-size: 1rem; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #status { padding: 0.6rem 1rem; background: #f4f4f4; border-radius: 4px; margin: 1rem 0; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem; line-height: 1.4; max-height: 280px; overflow-y: auto; }
+  #meter { width: 100%; height: 18px; background: #eee; border-radius: 4px; overflow: hidden; }
+  #meter > div { height: 100%; background: linear-gradient(to right, #4caf50, #ff9800, #f44336); width: 0%; transition: width 60ms linear; }
+  .dim { color: #888; }
+  code { background: #f4f4f4; padding: 0 0.3em; border-radius: 2px; }
+</style>
+</head>
+<body>
+<h1>Streaming Arena — Echo Test</h1>
+<p class="dim">Day 1 plumbing. Mic capture → WebSocket → server echoes → playback.
+Confirms the audio loop works before models land.</p>
+
+<div class="row">
+  <label for="inDev">Input device</label>
+  <select id="inDev" style="flex:1"></select>
+</div>
+<div class="row">
+  <label for="outDev">Output device</label>
+  <select id="outDev" style="flex:1"></select>
+</div>
+<div class="row">
+  <label>Input level</label>
+  <div id="meter" style="flex:1"><div></div></div>
+</div>
+<div class="row">
+  <button id="btnStart">Start</button>
+  <button id="btnStop" disabled>Stop</button>
+  <span id="rtt" class="dim"></span>
+</div>
+
+<pre id="status">Idle.</pre>
+
+<script type="module">
+const SAMPLE_RATE = 16000;
+const FRAME_SAMPLES = 256;        // 16 ms at 16 kHz
+const WS_URL = `ws://${location.host}/ws`;
+
+const $ = (id) => document.getElementById(id);
+const log = (msg) => { $("status").textContent = new Date().toLocaleTimeString() + "  " + msg + "\n" + $("status").textContent; };
+const meter = $("meter").firstElementChild;
+
+let audioCtx = null;
+let micStream = null;
+let workletNode = null;
+let ws = null;
+let playbackQueue = [];
+let playbackSource = null;
+let nextPlaybackTime = 0;
+let framesSent = 0;
+let framesRecv = 0;
+
+async function listDevices() {
+  // Prompt once so device labels populate.
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    s.getTracks().forEach(t => t.stop());
+  } catch (e) { /* permission denied; continue */ }
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const inDev = $("inDev"), outDev = $("outDev");
+  inDev.innerHTML = ""; outDev.innerHTML = "";
+  for (const d of devices) {
+    const opt = document.createElement("option");
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `(${d.kind})`;
+    if (d.kind === "audioinput") inDev.appendChild(opt);
+    else if (d.kind === "audiooutput") outDev.appendChild(opt.cloneNode(true));
+  }
+}
+
+async function start() {
+  $("btnStart").disabled = true;
+
+  audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: "interactive" });
+  // Older Chrome sometimes ignores sampleRate hint — verify.
+  if (audioCtx.sampleRate !== SAMPLE_RATE) {
+    log(`warn: AudioContext sampleRate = ${audioCtx.sampleRate}, expected ${SAMPLE_RATE}`);
+  }
+
+  await audioCtx.audioWorklet.addModule("/static/capture.js");
+
+  const constraints = {
+    audio: {
+      deviceId: $("inDev").value ? { exact: $("inDev").value } : undefined,
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      channelCount: 1,
+    }
+  };
+  micStream = await navigator.mediaDevices.getUserMedia(constraints);
+  const micSrc = audioCtx.createMediaStreamSource(micStream);
+
+  workletNode = new AudioWorkletNode(audioCtx, "capture-processor", {
+    processorOptions: { frameSamples: FRAME_SAMPLES }
+  });
+  micSrc.connect(workletNode);
+  // Don't connect worklet to destination — we don't want to hear the raw mic.
+
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => { log("ws open"); $("btnStop").disabled = false; };
+  ws.onclose = () => { log("ws close"); cleanup(); };
+  ws.onerror = (e) => { log("ws error: " + e.type); };
+  ws.onmessage = (ev) => {
+    framesRecv++;
+    const pcm = new Int16Array(ev.data);
+    schedulePlayback(pcm);
+  };
+
+  workletNode.port.onmessage = (ev) => {
+    const { pcm, level } = ev.data;
+    meter.style.width = Math.min(100, level * 100 * 4) + "%";
+    if (ws && ws.readyState === 1) {
+      ws.send(pcm.buffer);
+      framesSent++;
+      if (framesSent % 60 === 0) {
+        log(`sent=${framesSent} recv=${framesRecv} q=${playbackQueue.length}`);
+      }
+    }
+  };
+}
+
+function schedulePlayback(int16) {
+  // Convert int16 → float32 in-place once per frame. Schedule as a quick
+  // AudioBuffer playback so gaps between chunks are contiguous.
+  const f32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
+  const buf = audioCtx.createBuffer(1, f32.length, SAMPLE_RATE);
+  buf.copyToChannel(f32, 0);
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(audioCtx.destination);
+  const now = audioCtx.currentTime;
+  const startAt = Math.max(now + 0.02, nextPlaybackTime);
+  src.start(startAt);
+  nextPlaybackTime = startAt + f32.length / SAMPLE_RATE;
+}
+
+function cleanup() {
+  try { workletNode?.disconnect(); } catch (e) {}
+  try { micStream?.getTracks().forEach(t => t.stop()); } catch (e) {}
+  try { audioCtx?.close(); } catch (e) {}
+  try { ws?.close(); } catch (e) {}
+  $("btnStart").disabled = false;
+  $("btnStop").disabled = true;
+}
+
+$("btnStart").onclick = () => { start().catch(e => { log("start error: " + e.message); cleanup(); }); };
+$("btnStop").onclick = cleanup;
+
+listDevices().then(() => log("ready — pick devices and press Start"));
+navigator.mediaDevices.addEventListener("devicechange", listDevices);
+</script>
+</body>
+</html>
