@@ -60,7 +60,6 @@ let audioCtx = null;
 let actualRate = TARGET_RATE;
 let frameSamples = Math.round(TARGET_RATE * FRAME_MS / 1000);
 let micStream = null;
-let workletNode = null;
 let ws = null;
 let nextPlaybackTime = 0;
 let framesSent = 0;
@@ -68,7 +67,12 @@ let framesRecv = 0;
 
 async function ensureCtx() {
   if (audioCtx && audioCtx.state !== "closed") return audioCtx;
-  audioCtx = new AudioContext({ sampleRate: TARGET_RATE, latencyHint: "interactive" });
+  // Don't force sampleRate — let Chrome use the device's native rate (the
+  // Scarlett is 48 kHz). Chrome's USB-audio resampler to a non-native rate
+  // has been observed to feed AudioWorklet inputs zero samples on macOS.
+  // We'll sidestep the resample on capture and run playback at the same
+  // native rate. Any rate conversion we need can happen server-side later.
+  audioCtx = new AudioContext({ latencyHint: "interactive" });
   actualRate = audioCtx.sampleRate;
   frameSamples = Math.round(actualRate * FRAME_MS / 1000);
   // CRITICAL: reset playback clock for the new context. AudioContext.currentTime
@@ -129,11 +133,17 @@ async function listDevices() {
   }
 }
 
+let captureReader = null;
+let captureActive = false;
+
 async function start() {
   $("btnStart").disabled = true;
-
+  if (typeof MediaStreamTrackProcessor === "undefined") {
+    log("ERR: MediaStreamTrackProcessor not available in this browser");
+    $("btnStart").disabled = false;
+    return;
+  }
   await ensureCtx();
-  await audioCtx.audioWorklet.addModule("/static/capture.js");
 
   const constraints = {
     audio: {
@@ -145,22 +155,19 @@ async function start() {
     }
   };
   micStream = await navigator.mediaDevices.getUserMedia(constraints);
-  const micSrc = audioCtx.createMediaStreamSource(micStream);
+  const track = micStream.getAudioTracks()[0];
+  log(`mic track: label="${track.label}" state=${track.readyState} muted=${track.muted} enabled=${track.enabled}`);
+  log(`track settings: ${JSON.stringify(track.getSettings())}`);
 
-  workletNode = new AudioWorkletNode(audioCtx, "capture-processor", {
-    processorOptions: { frameSamples }
-  });
-  // Chrome only pulls MediaStreamSource audio if the node is reachable from
-  // destination. If we ONLY connect micSrc → workletNode (no path to dest),
-  // Chrome culls the upstream and the worklet's input is silent — which is
-  // exactly what we were seeing (meter briefly flashed from startup noise,
-  // then zeros). Fix: micSrc → zero-gain → destination keeps the mic stream
-  // pulled. The worklet taps off micSrc in parallel for capture.
-  const silencer = audioCtx.createGain();
-  silencer.gain.value = 0;
-  micSrc.connect(silencer);
-  silencer.connect(audioCtx.destination);
-  micSrc.connect(workletNode);
+  // MediaStreamTrackProcessor reads AudioData frames directly from the
+  // track — bypasses the Web Audio graph entirely for capture, avoiding
+  // the known macOS Chrome bug where MediaStreamSource → AudioWorklet
+  // delivers zero samples while the same micSrc feeds destination fine.
+  const processor = new MediaStreamTrackProcessor({ track });
+  captureReader = processor.readable.getReader();
+  captureActive = true;
+
+  frameSamples = Math.round(actualRate * FRAME_MS / 1000);
 
   ws = new WebSocket(WS_URL);
   ws.binaryType = "arraybuffer";
@@ -178,17 +185,87 @@ async function start() {
     if (framesRecv === 1) log(`first echo: ${pcm.length} samples, max=${pcm.reduce((m,x)=>Math.max(m,Math.abs(x)),0)}`);
   };
 
-  workletNode.port.onmessage = (ev) => {
-    const { pcm, level } = ev.data;
-    meter.style.width = Math.min(100, level * 100 * 4) + "%";
-    if (ws && ws.readyState === 1) {
-      ws.send(pcm.buffer);
-      framesSent++;
-      if (framesSent % 60 === 0) {
-        log(`sent=${framesSent} recv=${framesRecv} q=${playbackQueue.length}`);
+  // Pump AudioData frames from the track. This runs on a Promise chain
+  // driven by the track's render cadence.
+  let firstFrameSeen = false;
+  let sentMaxRecent = 0;
+  let chunkBuf = new Float32Array(frameSamples);
+  let chunkWrite = 0;
+
+  (async () => {
+    try {
+      while (captureActive) {
+        const { value: audioData, done } = await captureReader.read();
+        if (done || !audioData) break;
+        // The Scarlett Solo exposes as stereo. The SM58 on Input 1 lands on
+        // channel 1 (right), not channel 0 — verified empirically on the
+        // 4th Gen (perChannelMax=[0, 0.21]). Read all channels and downmix
+        // to mono so input polarity is device-agnostic.
+        const n = audioData.numberOfFrames;
+        const nCh = audioData.numberOfChannels;
+        const channels = [];
+        for (let c = 0; c < nCh; c++) {
+          const buf = new Float32Array(n);
+          audioData.copyTo(buf, { planeIndex: c, format: "f32-planar" });
+          channels.push(buf);
+        }
+        audioData.close();
+
+        // Mix to mono: sum channels (equal weight) — inputs from a mono mic
+        // plugged into channel 0 or channel 1 both reach the worklet, and
+        // true-stereo input is preserved as a downmix.
+        const scratch = new Float32Array(n);
+        if (nCh === 1) {
+          scratch.set(channels[0]);
+        } else {
+          for (let i = 0; i < n; i++) {
+            let s = 0;
+            for (let c = 0; c < nCh; c++) s += channels[c][i];
+            scratch[i] = s / nCh;
+          }
+        }
+
+        if (!firstFrameSeen) {
+          const maxes = channels.map(ch => {
+            let m = 0;
+            for (const v of ch) { const a = v < 0 ? -v : v; if (a > m) m = a; }
+            return m.toFixed(4);
+          });
+          firstFrameSeen = true;
+          log(`first AudioData: ${n} samples, nCh=${nCh}, perChannelMax=[${maxes.join(", ")}] sr=${audioData.sampleRate || "?"}`);
+        }
+
+        // Buffer into fixed-size chunks of frameSamples, emit as int16 PCM.
+        for (let i = 0; i < n; i++) {
+          chunkBuf[chunkWrite++] = scratch[i];
+          if (chunkWrite === frameSamples) {
+            const pcm = new Int16Array(frameSamples);
+            let peak = 0;
+            for (let k = 0; k < frameSamples; k++) {
+              const s = Math.max(-1, Math.min(1, chunkBuf[k]));
+              pcm[k] = s < 0 ? s * 0x8000 : s * 0x7fff;
+              const a = s < 0 ? -s : s;
+              if (a > peak) peak = a;
+            }
+            if (peak > sentMaxRecent) sentMaxRecent = Math.round(peak * 32767);
+            meter.style.width = Math.min(100, peak * 100 * 4) + "%";
+            if (ws && ws.readyState === 1) {
+              ws.send(pcm.buffer);
+              framesSent++;
+              if (framesSent % 60 === 0) {
+                log(`sent=${framesSent} recv=${framesRecv} sentMax(last60)=${sentMaxRecent}`);
+                sentMaxRecent = 0;
+              }
+            }
+            chunkBuf = new Float32Array(frameSamples);
+            chunkWrite = 0;
+          }
+        }
       }
+    } catch (err) {
+      log(`capture pump error: ${err.message}`);
     }
-  };
+  })();
 }
 
 function schedulePlayback(int16) {
@@ -245,7 +322,9 @@ async function toggleMonitor() {
 }
 
 function cleanup() {
-  try { workletNode?.disconnect(); } catch (e) {}
+  captureActive = false;
+  try { captureReader?.cancel(); } catch (e) {}
+  captureReader = null;
   try { micStream?.getTracks().forEach(t => t.stop()); } catch (e) {}
   try { audioCtx?.close(); } catch (e) {}
   try { ws?.close(); } catch (e) {}
