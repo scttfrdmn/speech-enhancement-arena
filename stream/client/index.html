@@ -37,14 +37,19 @@ Confirms the audio loop works before models land.</p>
 <div class="row">
   <button id="btnStart">Start</button>
   <button id="btnStop" disabled>Stop</button>
+  <button id="btnTone">Test Tone</button>
+  <button id="btnMonitor">Monitor (no WS)</button>
   <span id="rtt" class="dim"></span>
 </div>
 
 <pre id="status">Idle.</pre>
 
 <script type="module">
-const SAMPLE_RATE = 16000;
-const FRAME_SAMPLES = 256;        // 16 ms at 16 kHz
+// Nominal capture/playback rate. Chrome frequently ignores this for the
+// AudioContext on macOS and uses the system output rate (often 48000).
+// We detect the actual rate at construction and drive everything from there.
+const TARGET_RATE = 16000;
+const FRAME_MS = 16;              // chunk duration
 const WS_URL = `ws://${location.host}/ws`;
 
 const $ = (id) => document.getElementById(id);
@@ -52,14 +57,57 @@ const log = (msg) => { $("status").textContent = new Date().toLocaleTimeString()
 const meter = $("meter").firstElementChild;
 
 let audioCtx = null;
+let actualRate = TARGET_RATE;
+let frameSamples = Math.round(TARGET_RATE * FRAME_MS / 1000);
 let micStream = null;
 let workletNode = null;
 let ws = null;
-let playbackQueue = [];
-let playbackSource = null;
 let nextPlaybackTime = 0;
 let framesSent = 0;
 let framesRecv = 0;
+
+async function ensureCtx() {
+  if (audioCtx && audioCtx.state !== "closed") return audioCtx;
+  audioCtx = new AudioContext({ sampleRate: TARGET_RATE, latencyHint: "interactive" });
+  actualRate = audioCtx.sampleRate;
+  frameSamples = Math.round(actualRate * FRAME_MS / 1000);
+  // CRITICAL: reset playback clock for the new context. AudioContext.currentTime
+  // starts at ~0 for each new context, but nextPlaybackTime carries over from
+  // the previous session's closed context — which would schedule every frame
+  // of this session far in the future (silent).
+  nextPlaybackTime = 0;
+  framesSent = 0;
+  framesRecv = 0;
+  log(`ctx: rate=${actualRate} Hz, frameSamples=${frameSamples}, state=${audioCtx.state}`);
+  if (audioCtx.state === "suspended") {
+    try { await audioCtx.resume(); log(`ctx resumed, state=${audioCtx.state}`); } catch (e) { log("resume err: " + e.message); }
+  }
+  // Route to the selected output device if the browser supports it.
+  const outId = $("outDev").value;
+  if (outId && typeof audioCtx.setSinkId === "function") {
+    try {
+      await audioCtx.setSinkId(outId);
+      log("ctx sinkId set to " + ($("outDev").selectedOptions[0]?.textContent || outId));
+    } catch (e) { log("setSinkId err: " + e.message); }
+  } else if (outId) {
+    log("warn: AudioContext.setSinkId not supported in this browser; using system default output");
+  }
+  return audioCtx;
+}
+
+async function playTone() {
+  await ensureCtx();
+  const dur = 0.4;
+  const n = Math.round(dur * actualRate);
+  const buf = audioCtx.createBuffer(1, n, actualRate);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) ch[i] = 0.25 * Math.sin(2 * Math.PI * 440 * i / actualRate);
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(audioCtx.destination);
+  src.start();
+  log(`test tone: 440 Hz, ${dur*1000} ms @ ${actualRate} Hz`);
+}
 
 async function listDevices() {
   // Prompt once so device labels populate.
@@ -82,12 +130,7 @@ async function listDevices() {
 async function start() {
   $("btnStart").disabled = true;
 
-  audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: "interactive" });
-  // Older Chrome sometimes ignores sampleRate hint — verify.
-  if (audioCtx.sampleRate !== SAMPLE_RATE) {
-    log(`warn: AudioContext sampleRate = ${audioCtx.sampleRate}, expected ${SAMPLE_RATE}`);
-  }
-
+  await ensureCtx();
   await audioCtx.audioWorklet.addModule("/static/capture.js");
 
   const constraints = {
@@ -103,10 +146,19 @@ async function start() {
   const micSrc = audioCtx.createMediaStreamSource(micStream);
 
   workletNode = new AudioWorkletNode(audioCtx, "capture-processor", {
-    processorOptions: { frameSamples: FRAME_SAMPLES }
+    processorOptions: { frameSamples }
   });
+  // Chrome only pulls MediaStreamSource audio if the node is reachable from
+  // destination. If we ONLY connect micSrc → workletNode (no path to dest),
+  // Chrome culls the upstream and the worklet's input is silent — which is
+  // exactly what we were seeing (meter briefly flashed from startup noise,
+  // then zeros). Fix: micSrc → zero-gain → destination keeps the mic stream
+  // pulled. The worklet taps off micSrc in parallel for capture.
+  const silencer = audioCtx.createGain();
+  silencer.gain.value = 0;
+  micSrc.connect(silencer);
+  silencer.connect(audioCtx.destination);
   micSrc.connect(workletNode);
-  // Don't connect worklet to destination — we don't want to hear the raw mic.
 
   ws = new WebSocket(WS_URL);
   ws.binaryType = "arraybuffer";
@@ -115,8 +167,13 @@ async function start() {
   ws.onerror = (e) => { log("ws error: " + e.type); };
   ws.onmessage = (ev) => {
     framesRecv++;
+    if (!(ev.data instanceof ArrayBuffer)) {
+      if (framesRecv === 1) log("warn: ws returned " + typeof ev.data + ", expected ArrayBuffer");
+      return;
+    }
     const pcm = new Int16Array(ev.data);
     schedulePlayback(pcm);
+    if (framesRecv === 1) log(`first echo: ${pcm.length} samples, max=${pcm.reduce((m,x)=>Math.max(m,Math.abs(x)),0)}`);
   };
 
   workletNode.port.onmessage = (ev) => {
@@ -133,19 +190,46 @@ async function start() {
 }
 
 function schedulePlayback(int16) {
-  // Convert int16 → float32 in-place once per frame. Schedule as a quick
-  // AudioBuffer playback so gaps between chunks are contiguous.
   const f32 = new Float32Array(int16.length);
   for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
-  const buf = audioCtx.createBuffer(1, f32.length, SAMPLE_RATE);
+  const buf = audioCtx.createBuffer(1, f32.length, actualRate);
   buf.copyToChannel(f32, 0);
   const src = audioCtx.createBufferSource();
   src.buffer = buf;
   src.connect(audioCtx.destination);
   const now = audioCtx.currentTime;
   const startAt = Math.max(now + 0.02, nextPlaybackTime);
+  if (framesRecv === 1) {
+    src.onended = () => log(`first echo src ended (startAt=${startAt.toFixed(3)}, ctx now=${audioCtx.currentTime.toFixed(3)}, dur=${(f32.length/actualRate).toFixed(3)}s)`);
+    log(`scheduling first echo: startAt=${startAt.toFixed(3)} now=${now.toFixed(3)} destCh=${audioCtx.destination.channelCount} state=${audioCtx.state}`);
+  }
   src.start(startAt);
-  nextPlaybackTime = startAt + f32.length / SAMPLE_RATE;
+  nextPlaybackTime = startAt + f32.length / actualRate;
+}
+
+let monitorNode = null;
+async function toggleMonitor() {
+  if (monitorNode) {
+    try { monitorNode.disconnect(); } catch (e) {}
+    monitorNode = null;
+    micStream?.getTracks().forEach(t => t.stop());
+    micStream = null;
+    log("monitor off");
+    return;
+  }
+  await ensureCtx();
+  const constraints = {
+    audio: {
+      deviceId: $("inDev").value ? { exact: $("inDev").value } : undefined,
+      echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+      channelCount: 1,
+    }
+  };
+  micStream = await navigator.mediaDevices.getUserMedia(constraints);
+  const micSrc = audioCtx.createMediaStreamSource(micStream);
+  micSrc.connect(audioCtx.destination);
+  monitorNode = micSrc;
+  log(`monitor ON: mic → destination direct, sinkId=${$("outDev").selectedOptions[0]?.textContent}`);
 }
 
 function cleanup() {
@@ -159,6 +243,16 @@ function cleanup() {
 
 $("btnStart").onclick = () => { start().catch(e => { log("start error: " + e.message); cleanup(); }); };
 $("btnStop").onclick = cleanup;
+$("btnTone").onclick = () => { playTone().catch(e => log("tone err: " + e.message)); };
+$("btnMonitor").onclick = () => { toggleMonitor().catch(e => log("monitor err: " + e.message)); };
+$("outDev").onchange = async () => {
+  if (audioCtx && typeof audioCtx.setSinkId === "function") {
+    try {
+      await audioCtx.setSinkId($("outDev").value);
+      log("sinkId → " + $("outDev").selectedOptions[0]?.textContent);
+    } catch (e) { log("setSinkId err: " + e.message); }
+  }
+};
 
 listDevices().then(() => log("ready — pick devices and press Start"));
 navigator.mediaDevices.addEventListener("devicechange", listDevices);
