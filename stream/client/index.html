@@ -194,15 +194,15 @@ async function start() {
 function schedulePlayback(int16) {
   const f32 = new Float32Array(int16.length);
   for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
-  // Create a 2-channel buffer and copy mono to BOTH channels so stereo
-  // outputs (like the Scarlett's L/R 1/4" jacks into a stereo speaker like
-  // the X600) play centered instead of left-only.
-  const buf = audioCtx.createBuffer(2, f32.length, actualRate);
+  const buf = audioCtx.createBuffer(1, f32.length, actualRate);
   buf.copyToChannel(f32, 0);
-  buf.copyToChannel(f32, 1);
   const src = audioCtx.createBufferSource();
   src.buffer = buf;
-  src.connect(audioCtx.destination);
+  // Mono → both L/R via a ChannelMerger, same pattern as Monitor mode.
+  const toStereo = audioCtx.createChannelMerger(2);
+  src.connect(toStereo, 0, 0);
+  src.connect(toStereo, 0, 1);
+  toStereo.connect(audioCtx.destination);
   const now = audioCtx.currentTime;
   const startAt = Math.max(now + 0.02, nextPlaybackTime);
   if (framesRecv === 1) {
