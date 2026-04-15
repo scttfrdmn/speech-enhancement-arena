@@ -99,9 +99,11 @@ async function playTone() {
   await ensureCtx();
   const dur = 0.4;
   const n = Math.round(dur * actualRate);
-  const buf = audioCtx.createBuffer(1, n, actualRate);
-  const ch = buf.getChannelData(0);
-  for (let i = 0; i < n; i++) ch[i] = 0.25 * Math.sin(2 * Math.PI * 440 * i / actualRate);
+  const buf = audioCtx.createBuffer(2, n, actualRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const out = buf.getChannelData(ch);
+    for (let i = 0; i < n; i++) out[i] = 0.25 * Math.sin(2 * Math.PI * 440 * i / actualRate);
+  }
   const src = audioCtx.createBufferSource();
   src.buffer = buf;
   src.connect(audioCtx.destination);
@@ -192,8 +194,12 @@ async function start() {
 function schedulePlayback(int16) {
   const f32 = new Float32Array(int16.length);
   for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
-  const buf = audioCtx.createBuffer(1, f32.length, actualRate);
+  // Create a 2-channel buffer and copy mono to BOTH channels so stereo
+  // outputs (like the Scarlett's L/R 1/4" jacks into a stereo speaker like
+  // the X600) play centered instead of left-only.
+  const buf = audioCtx.createBuffer(2, f32.length, actualRate);
   buf.copyToChannel(f32, 0);
+  buf.copyToChannel(f32, 1);
   const src = audioCtx.createBufferSource();
   src.buffer = buf;
   src.connect(audioCtx.destination);
@@ -227,8 +233,14 @@ async function toggleMonitor() {
   };
   micStream = await navigator.mediaDevices.getUserMedia(constraints);
   const micSrc = audioCtx.createMediaStreamSource(micStream);
-  micSrc.connect(audioCtx.destination);
-  monitorNode = micSrc;
+  // Force mono-to-stereo so both L/R outputs of the Scarlett carry the
+  // same signal (X600 inputs are stereo; single-channel feed would leave
+  // one side silent).
+  const toStereo = audioCtx.createChannelMerger(2);
+  micSrc.connect(toStereo, 0, 0);
+  micSrc.connect(toStereo, 0, 1);
+  toStereo.connect(audioCtx.destination);
+  monitorNode = toStereo;
   log(`monitor ON: mic → destination direct, sinkId=${$("outDev").selectedOptions[0]?.textContent}`);
 }
 
