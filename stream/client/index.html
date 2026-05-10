@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Streaming Arena — Echo</title>
+<title>Streaming Arena</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; }
   h1 { margin-top: 0; }
@@ -18,9 +18,7 @@
 </style>
 </head>
 <body>
-<h1>Streaming Arena — Echo Test</h1>
-<p class="dim">Day 1 plumbing. Mic capture → WebSocket → server echoes → playback.
-Confirms the audio loop works before models land.</p>
+<h1>Streaming Arena</h1>
 
 <div class="row">
   <label for="inDev">Input device</label>
@@ -29,6 +27,11 @@ Confirms the audio loop works before models land.</p>
 <div class="row">
   <label for="outDev">Output device</label>
   <select id="outDev" style="flex:1"></select>
+</div>
+<div class="row">
+  <label for="modelSel">Model</label>
+  <select id="modelSel" style="flex:1"><option value="">loading…</option></select>
+  <span id="modelMeta" class="dim" style="font-size:0.8rem;margin-left:0.5rem"></span>
 </div>
 <div class="row">
   <label>Input level</label>
@@ -50,7 +53,12 @@ Confirms the audio loop works before models land.</p>
 // We detect the actual rate at construction and drive everything from there.
 const TARGET_RATE = 16000;
 const FRAME_MS = 16;              // chunk duration
-const WS_URL = `ws://${location.host}/ws`;
+// Allow ?server=host:port to point at a remote inference server (Day 3+).
+// Falls back to same-origin if not specified.
+const _serverParam = new URLSearchParams(location.search).get("server");
+const _serverHost = _serverParam || location.host;
+const wsUrl = () => `ws://${_serverHost}/ws?model=${encodeURIComponent($("modelSel").value || "conv_mask")}`;
+const _modelsUrl = `http://${_serverHost}/api/models`;
 
 const $ = (id) => document.getElementById(id);
 const log = (msg) => { $("status").textContent = new Date().toLocaleTimeString() + "  " + msg + "\n" + $("status").textContent; };
@@ -169,7 +177,7 @@ async function start() {
 
   frameSamples = Math.round(actualRate * FRAME_MS / 1000);
 
-  ws = new WebSocket(WS_URL);
+  ws = new WebSocket(wsUrl());
   ws.binaryType = "arraybuffer";
   ws.onopen = () => { log("ws open"); $("btnStop").disabled = false; };
   ws.onclose = () => { log("ws close"); cleanup(); };
@@ -281,7 +289,7 @@ function schedulePlayback(int16) {
   src.connect(toStereo, 0, 1);
   toStereo.connect(audioCtx.destination);
   const now = audioCtx.currentTime;
-  const startAt = Math.max(now + 0.02, nextPlaybackTime);
+  const startAt = Math.max(now + 0.005, nextPlaybackTime);
   if (framesRecv === 1) {
     src.onended = () => log(`first echo src ended (startAt=${startAt.toFixed(3)}, ctx now=${audioCtx.currentTime.toFixed(3)}, dur=${(f32.length/actualRate).toFixed(3)}s)`);
     log(`scheduling first echo: startAt=${startAt.toFixed(3)} now=${now.toFixed(3)} destCh=${audioCtx.destination.channelCount} state=${audioCtx.state}`);
@@ -345,7 +353,58 @@ $("outDev").onchange = async () => {
   }
 };
 
-listDevices().then(() => log("ready — pick devices and press Start"));
+async function loadModels() {
+  try {
+    const resp = await fetch(_modelsUrl);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const sel = $("modelSel");
+    sel.innerHTML = "";
+    for (const [key, meta] of Object.entries(data.models)) {
+      const opt = document.createElement("option");
+      opt.value = key;
+      opt.textContent = `${meta.label} (${meta.loss_str} dB)`;
+      if (key === data.default) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    updateModelMeta();
+    log(`models loaded: ${Object.keys(data.models).join(", ")} — default: ${data.default}`);
+  } catch (e) {
+    log("warn: could not load model list (" + e.message + ")");
+  }
+}
+
+function updateModelMeta() {
+  // Show params for selected model in the meta span (populated client-side from option text)
+  const sel = $("modelSel");
+  $("modelMeta").textContent = sel.selectedOptions[0]?.textContent || "";
+}
+
+$("modelSel").onchange = () => {
+  updateModelMeta();
+  // If currently streaming, reconnect with the new model.
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    log("model changed — reconnecting WebSocket");
+    ws.close();
+    // start() will be re-triggered by ws.onclose → cleanup → user re-clicks Start,
+    // but for a smoother UX we reconnect automatically:
+    setTimeout(() => {
+      if (!captureActive) return; // user already stopped
+      ws = new WebSocket(wsUrl());
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => log(`ws reconnected (model=${$("modelSel").value})`);
+      ws.onclose = () => { log("ws close"); cleanup(); };
+      ws.onerror = (e) => log("ws error: " + e.type);
+      ws.onmessage = (ev) => {
+        framesRecv++;
+        if (!(ev.data instanceof ArrayBuffer)) return;
+        schedulePlayback(new Int16Array(ev.data));
+      };
+    }, 120);
+  }
+};
+
+listDevices().then(() => loadModels()).then(() => log("ready — pick devices and press Start"));
 navigator.mediaDevices.addEventListener("devicechange", listDevices);
 </script>
 </body>

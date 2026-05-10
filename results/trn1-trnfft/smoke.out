@@ -1,0 +1,43 @@
+/home/ubuntu/speech-enhancement-arena/train.py:135: DeprecationWarning: Use torch_xla.device instead
+  device = xm.xla_device()
+2026-Apr-13 00:34:50.0207 4060:4367 [10] int nccl_net_ofi_create_plugin(nccl_net_ofi_plugin_t**):213 CCOM WARN NET/OFI Failed to initialize sendrecv protocol
+2026-Apr-13 00:34:50.0213 4060:4367 [10] int nccl_net_ofi_create_plugin(nccl_net_ofi_plugin_t**):354 CCOM WARN NET/OFI aws-ofi-nccl initialization failed
+2026-Apr-13 00:34:50.0218 4060:4367 [10] ncclResult_t nccl_net_ofi_init_no_atexit_fini_v6(ncclDebugLogger_t):183 CCOM WARN NET/OFI Initializing plugin failed
+2026-Apr-13 00:34:50.0224 4060:4367 [10] net_plugin.cc:97 CCOM WARN OFI plugin initNet() failed is EFA enabled?
+....
+Compiler status PASS
+[device] Trainium via PyTorch/XLA (legacy path)
+[model] ConvMaskNet — 5.0M parameters (scale=small)
+[model] Conv U-Net encoder-decoder, magnitude mask
+[data] GPU batch generator (64 samples, 4 batches on xla:0)
+[xla] Using constant LR (no scheduler) to avoid graph recompilation
+
+[train] Starting 3 epochs, batch_size=16
+[train] Loss: SI-SDR only (XLA)
+[train] LR: 0.0003 (constant (XLA)), Run ID: trnfft_smoke
+------------------------------------------------------------
+2026-04-13 00:36:11.000337:  4060  [INFO]: Compilation Successfully Completed for model.MODULE_2684486077288423602+e30acd3a.hlo_module.pb
+Traceback (most recent call last):
+  File "/home/ubuntu/speech-enhancement-arena/train.py", line 579, in <module>
+    main()
+  File "/home/ubuntu/speech-enhancement-arena/train.py", line 575, in main
+    train(args)
+  File "/home/ubuntu/speech-enhancement-arena/train.py", line 375, in train
+    enhanced = model(noisy)
+               ^^^^^^^^^^^^
+  File "/opt/aws_neuronx_venv_pytorch_2_9/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/aws_neuronx_venv_pytorch_2_9/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/speech-enhancement-arena/models/architectures.py", line 196, in forward
+    X = self.stft_proc.stft(noisy_wav)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/speech-enhancement-arena/models/architectures.py", line 80, in stft
+    return trnfft.stft(x, n_fft=self.n_fft, hop_length=self.hop_length,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/aws_neuronx_venv_pytorch_2_9/lib/python3.12/site-packages/trnfft/api.py", line 164, in stft
+    frames_tensor = input.unfold(-1, n_fft, hop_length)  # (..., num_frames, n_fft)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: The operator aten::unfold appears to be a view operator, but it has no implementation for the backend "xla:0". View operators don't support since the tensor's storage cannot be shared across devices.

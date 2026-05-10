@@ -50,7 +50,10 @@ except ImportError:
 app = FastAPI(title="Speech Enhancement Arena")
 loaded_models = {}
 device = torch.device("cpu")
+# stft_proc is initialized per-model based on the checkpoint's n_fft
+# (model scales differ: small uses n_fft=512, large uses n_fft=1024)
 stft_proc = STFTProcessor(n_fft=512, hop_length=128)
+stft_procs = {}  # per-model overrides keyed by model_key
 
 
 # ---------------------------------------------------------------------------
@@ -71,17 +74,25 @@ def load_models(checkpoint_dir, device_str="cpu"):
                 ckpt_path = matches[0]
                 try:
                     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-                    model = get_model(model_key).to(device)
+                    scale = ckpt.get("scale", "small")
+                    model = get_model(model_key, scale=scale).to(device)
                     model.load_state_dict(ckpt["model_state_dict"])
                     model.eval()
+                    # Match this model's n_fft on its STFTProcessor
+                    from models.architectures import SCALE_CONFIGS
+                    n_fft = SCALE_CONFIGS[scale][model_key].get("n_fft", 512)
+                    stft_procs[model_key] = STFTProcessor(n_fft=n_fft, hop_length=n_fft // 4)
                     loaded_models[model_key] = {
                         "model": model,
+                        "scale": scale,
+                        "n_fft": n_fft,
                         "loss": ckpt.get("loss", None),
                         "si_sdr": ckpt.get("si_sdr", None),
                         "epoch": ckpt.get("epoch", None),
                     }
-                    print(f"  [loaded] {model_key} from {ckpt_path.name} "
-                          f"(loss={ckpt.get('loss', '?'):.4f})")
+                    loss_val = ckpt.get("loss", None)
+                    loss_str = f"{loss_val:.4f}" if isinstance(loss_val, (int, float)) else "?"
+                    print(f"  [loaded] {model_key} ({scale}) from {ckpt_path.name} (loss={loss_str})")
                 except Exception as e:
                     print(f"  [error] Failed to load {model_key}: {e}")
                 break
@@ -91,10 +102,13 @@ def load_models(checkpoint_dir, device_str="cpu"):
             model.eval()
             loaded_models[model_key] = {
                 "model": model,
+                "scale": "small",
+                "n_fft": 512,
                 "loss": None,
                 "si_sdr": None,
                 "epoch": None,
             }
+            stft_procs[model_key] = STFTProcessor(n_fft=512, hop_length=128)
             print(f"  [random] {model_key} (no checkpoint found, using random weights)")
 
     print(f"\n  {len(loaded_models)} models ready for inference.")

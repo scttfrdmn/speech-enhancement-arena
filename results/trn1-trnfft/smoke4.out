@@ -1,0 +1,43 @@
+/home/ubuntu/speech-enhancement-arena/train.py:138: DeprecationWarning: Use torch_xla.device instead
+  device = xm.xla_device()
+2026-Apr-13 18:59:29.0619 36497:36783 [6] int nccl_net_ofi_create_plugin(nccl_net_ofi_plugin_t**):213 CCOM WARN NET/OFI Failed to initialize sendrecv protocol
+2026-Apr-13 18:59:29.0630 36497:36783 [6] int nccl_net_ofi_create_plugin(nccl_net_ofi_plugin_t**):354 CCOM WARN NET/OFI aws-ofi-nccl initialization failed
+2026-Apr-13 18:59:29.0640 36497:36783 [6] ncclResult_t nccl_net_ofi_init_no_atexit_fini_v6(ncclDebugLogger_t):183 CCOM WARN NET/OFI Initializing plugin failed
+2026-Apr-13 18:59:29.0651 36497:36783 [6] net_plugin.cc:97 CCOM WARN OFI plugin initNet() failed is EFA enabled?
+.
+Compiler status PASS
+[device] Trainium via PyTorch/XLA (legacy path)
+[model] ConvMaskNet — 5.0M parameters (scale=small)
+[model] Conv U-Net encoder-decoder, magnitude mask
+[data] GPU batch generator (64 samples, 4 batches on xla:0)
+[xla] Using constant LR (no scheduler) to avoid graph recompilation
+
+[train] Starting 3 epochs, batch_size=16
+[train] Loss: SI-SDR only (XLA)
+[train] LR: 0.0003 (constant (XLA)), Run ID: smoke4
+------------------------------------------------------------
+2026-04-13 18:59:47.000374:  36497  [INFO]: Compilation Successfully Completed for model.MODULE_7730263981572132397+d7da8d33.hlo_module.pb
+.
+Compiler status PASS
+2026-04-13 19:00:03.000934:  36497  [INFO]: Compilation Successfully Completed for model.MODULE_460047450405484756+d7da8d33.hlo_module.pb
+/home/ubuntu/speech-enhancement-arena/train.py:391: DeprecationWarning: Use torch_xla.sync instead
+  xm.mark_step()
+..............................................................................................................................................................................................................................................................................................................................................................................................................
+Compiler status PASS
+2026-04-13 21:13:41.000312:  36497  [INFO]: Compilation Successfully Completed for model.MODULE_2970159258970524444+d7da8d33.hlo_module.pb
+.
+Compiler status PASS
+2026-04-13 21:14:53.000514:  36497  [INFO]: Compilation Successfully Completed for model.MODULE_15868890725522194704+d7da8d33.hlo_module.pb
+/home/ubuntu/speech-enhancement-arena/train.py:391: DeprecationWarning: Use torch_xla.sync instead
+  xm.mark_step()
+............................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+Compiler status PASS
+  Epoch   1/3 | Loss: -6.0371 | SI-SDR: +6.04 dB | LR: 3.00e-04 | 0 samp/s | Time: 8139s | CPU:7%
+2026-04-14 04:32:11.000404:  36497  [INFO]: Compilation Successfully Completed for model.MODULE_15137014934061220477+d7da8d33.hlo_module.pb
+/home/ubuntu/speech-enhancement-arena/train.py:391: DeprecationWarning: Use torch_xla.sync instead
+  xm.mark_step()
+  Epoch   2/3 | Loss: -7.6245 | SI-SDR: +7.62 dB | LR: 3.00e-04 | 0 samp/s | Time: 34435s | CPU:5%
+  Epoch   3/3 | Loss: -8.9233 | SI-SDR: +8.92 dB | LR: 3.00e-04 | 3 samp/s | Time: 34461s | CPU:6%
+------------------------------------------------------------
+[done] ConvMaskNet | Best loss: -8.9233 | Total time: 34460.9s | Throughput: 0 samp/s
+[done] Checkpoint: checkpoints/smoke4_best.pt
