@@ -88,9 +88,8 @@ python serve.py --checkpoint-dir checkpoints --device cuda
 # 1. Activate Neuron environment
 source /opt/aws_neuronx_venv_pytorch_2_9/bin/activate
 
-# 2. Install deps — including trnfft for Trainium-compatible STFT/complex ops
+# 2. Install dependencies
 pip install -r requirements.txt
-pip install "trnfft[neuron]"   # or: pip install git+https://github.com/trnsci/trnfft.git
 
 # Optional: persist compiled NEFFs to S3 across instances
 export NEURON_COMPILE_CACHE_URL=s3://your-bucket/neuron-cache/

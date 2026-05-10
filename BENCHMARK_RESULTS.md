@@ -138,7 +138,7 @@ Same Blackwell architecture, same 600W TDP, but consumer card is 1.6-2x faster:
 
 ### What made it work
 
-1. **`neuron-complex-ops`** (github.com/scttfrdmn/neuron-complex-ops) — real-valued STFT/iSTFT via explicit DFT matrix multiply. Avoids `torch.fft.*` and complex tensors entirely. Portable across CPU, CUDA, XLA/Trainium. *(Now incorporated into `trnfft`, part of the [trnsci](https://github.com/trnsci) scientific computing suite for Trainium — future arena versions will import from `trnfft` directly.)*
+1. **Native PyTorch STFT** — Uses `torch.stft/istft` with complex tensor support. Works across CPU, CUDA, MPS, and XLA/Trainium devices.
 2. **XLA-optimized training loop** — removed `.item()` per batch, dropped `clip_grad_norm_`, used `xm.optimizer_step()`, constant LR (no scheduler), skipped multi-resolution STFT loss on XLA. Dropped recompilations from 20+ per run to **2–3 per model**.
 3. **NEFF compile cache** via `NEURON_COMPILE_CACHE_URL` → S3 (`s3://aws-arena-neuron-cache-scttfrdmn/trn1-xla/`). First compile is slow (minutes to hours); cached reruns are near-instant.
 4. **Uni-GRU refactor** — replaced `nn.GRU(bidirectional=True)` with two stacked unidirectional GRUs + `torch.flip`. `torch-neuronx`'s scan-based optimization only supports unidirectional; bidirectional triggers dynamic-shape graph explosion.
@@ -325,7 +325,7 @@ You **cannot** horizontally scale local GPU systems without upgrading electrical
 - Don't run 1.5GB-VRAM models on 80GB A100s at OSC (96% VRAM waste)
 - Don't optimize for $/GPU-hr (optimize for $/result)
 - Don't treat student time as free (it costs $52/hr fully loaded)
-- Trainium now works for STFT-domain via `trnfft`/`neuron-complex-ops`, but is a niche fit: use it when you have a persistent cached workload and can amortize the slow first-compile. For one-off experiments it's not competitive with L4 Spot.
+- Trainium works for STFT-domain models but requires ahead-of-time compilation. Best suited for production workloads where you can compile once, cache to S3, and reuse across many inference runs. For one-off experiments, L4 Spot is more cost-effective.
 
 ---
 

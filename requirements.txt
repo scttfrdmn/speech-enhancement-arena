@@ -13,4 +13,3 @@ matplotlib
 
 # For Trainium (install separately on Trn instances):
 #   torch-neuronx, torch-xla, libneuronxla  (via Neuron SDK DLAMI)
-#   pip install "trnfft[neuron]"            (FFT/complex ops via NKI)

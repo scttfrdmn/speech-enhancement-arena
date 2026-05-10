@@ -76,10 +76,6 @@ cd speech-enhancement-arena
 # Install project dependencies
 pip install -r requirements.txt
 
-# Install trnfft for FFT operations on Trainium
-pip install "trnfft[neuron]"
-# Or from source:
-# pip install git+https://github.com/trnsci/trnfft.git
 ```
 
 ### Step 5: Configure NEFF Caching (Highly Recommended)
@@ -97,72 +93,48 @@ export NEURON_COMPILE_CACHE_URL=s3://your-neuron-cache-bucket/arena-cache/
 echo $NEURON_COMPILE_CACHE_URL
 ```
 
-### Step 6: Set Compilation Flags (Critical for FFT Models)
+### Step 6: Set Compilation Flags (Optional)
 
-These flags prevent compilation failures on FFT-heavy workloads:
+For very large models, you may need to adjust compilation settings:
 
 ```bash
-# Add to ~/.bashrc or export before training
-export NEURON_CC_FLAGS="--optlevel 1"
-export XLA_PARAMETER_WRAPPING_THREADSHOLD=50000  # Note: typo is intentional
+# Add to ~/.bashrc or export before training (if needed)
+export NEURON_CC_FLAGS="--optlevel 2"
 ```
-
-**Why:**
-- `--optlevel 1` — prevents catastrophic loop unrolling on FFT butterflies (default `3` can run for 14+ hours)
-- `XLA_PARAMETER_WRAPPING_THREADSHOLD` — raises graph parameter limit from 3200 to 50000
 
 ---
 
 ## Part 2: Training on Trainium
 
-### Option A: PyTorch/XLA Backend (Proven, Current Default)
+### Using TorchNeuron Native Backend (Recommended)
 
-This is the path tested in our smoke tests (`results/trn1-trnfft/`).
-
-```bash
-# Single model test (ConvMask, 3 epochs, ~9 hours first compile)
-python train.py \
-    --model conv_mask \
-    --device xla \
-    --epochs 3 \
-    --batch-size 16 \
-    --run-id trn1_test
-
-# Full 4-model arena (parallel, 4 NeuronCores)
-python arena.py --device xla --epochs 30
-```
-
-**Expected behavior:**
-1. First run: 2-8 hours compilation (per model), 30min-2h training per epoch
-2. Cached runs: 2-3 min compilation, same training time
-3. Console shows: `[device] Trainium via PyTorch/XLA (legacy path)`
-
-### Option B: TorchNeuron Native Backend (Beta, Recommended Going Forward)
-
-**Status:** Closed beta as of May 2026; preferred for new projects.
+The modern PyTorch integration for Trainium uses the native `neuron` device with minimal code changes from CUDA.
 
 ```bash
-# Single model
+# Single model test (ConvMask, 3 epochs)
 python train.py \
     --model conv_mask \
     --device neuron \
     --epochs 3 \
     --batch-size 16 \
-    --run-id trn1_native_test
+    --run-id trn1_test
 
-# Full arena
+# Full 4-model arena (parallel, 4 NeuronCores)
 python arena.py --device neuron --epochs 30
 ```
 
 **Expected behavior:**
 1. Console shows: `[device] Trainium via TorchNeuron native (Neuron SDK 2.28+)`
-2. Uses eager mode + torch.compile backend for JIT optimization
-3. Better debuggability; similar performance to XLA
+2. First run: compilation happens during first forward pass (similar to CUDA JIT)
+3. Cached runs: NEFFs load from S3, compilation skipped
+4. Uses eager mode + `torch.compile` backend for optimization
 
 **Code differences from CUDA:**
 - Device: `.to('neuron')` instead of `.to('cuda')`
 - Mixed precision: `torch.autocast(device_type="neuron")`
 - Distributed: Works with standard FSDP/DDP (no XLA-specific changes)
+
+**Note:** The legacy XLA backend (`--device xla`) is also supported but not recommended for new projects.
 
 ---
 
@@ -171,13 +143,13 @@ python arena.py --device neuron --epochs 30
 Pre-compile graphs before full training to avoid watching compilation during epochs:
 
 ```bash
-# Compile all models with a short 10-step run
-python arena.py --device xla --epochs 1 --num-samples 160 --run-id precompile
+# Compile all models with a short run to populate NEFF cache
+python arena.py --device neuron --epochs 1 --num-samples 160 --run-id precompile
 
 # Or use neuron_parallel_compile for faster parallel compilation
 neuron_parallel_compile python train.py \
     --model conv_mask \
-    --device xla \
+    --device neuron \
     --epochs 1 \
     --num-samples 160
 ```
@@ -218,7 +190,7 @@ Once models are trained, serve the streaming inference server:
 # On the same trn1 instance (or a trn1.2xlarge with cached NEFFs)
 python stream/server/inference.py \
     --checkpoint-dir checkpoints_libri \
-    --device xla \
+    --device neuron \
     --port 8765 \
     --context 0.5 \
     --hop 0.1
@@ -246,15 +218,13 @@ ssh -L 8765:localhost:8765 ubuntu@<trn1-ip>
 
 ```bash
 # Launch small instance ($1.34/hr)
-# Run training briefly to generate HLO .pb files
-python train.py --model conv_mask --device xla --epochs 1 --num-samples 64
+# Run training briefly to generate compilation artifacts
+python train.py --model conv_mask --device neuron --epochs 1 --num-samples 64
 
-# Kill after you see: "Compilation Successfully Completed" messages
-# HLO files are in: /tmp/ubuntu/neuroncc_compile_workdir/*/
-
-# Package and copy off
-tar czf hlo_graphs.tar.gz /tmp/ubuntu/neuroncc_compile_workdir/
-scp hlo_graphs.tar.gz your-workstation:~/
+# Compilation artifacts are cached locally during first run
+# Package and copy off if needed for manual cache seeding
+tar czf neuron_cache.tar.gz /tmp/neuroncc_compile_workdir/
+scp neuron_cache.tar.gz your-workstation:~/
 ```
 
 ### Step 2: Compile on r7i.24xlarge (x86, $6.36/hr)
@@ -292,7 +262,7 @@ aws s3 sync /tmp/ubuntu/neuroncc_compile_workdir/ \
 ```bash
 # Launch trn1.2xlarge, point at cache
 export NEURON_COMPILE_CACHE_URL=s3://your-neuron-cache-bucket/arena-cache/
-python arena.py --device xla --epochs 30
+python arena.py --device neuron --epochs 30
 ```
 
 **Result:** Zero compilation, models load in ~2 min, training starts immediately.
@@ -306,9 +276,8 @@ See [TRAINIUM_NOTES.md](TRAINIUM_NOTES.md) for full details. Key ones:
 1. **32GB RAM insufficient for first compile** — use trn1.32xlarge or r7i.24xlarge
 2. **`--optlevel 1` required** — FFT models won't finish at default `optlevel 3`
 3. **`XLA_PARAMETER_WRAPPING_THREADSHOLD=50000`** — typo in env var name is correct
-4. **No `torch.unfold` on XLA** — use explicit indexing (already fixed in trnfft)
+4. **No `torch.unfold` on XLA** — use explicit indexing with torch.arange
 5. **BiGRU split required** — use two unidirectional GRUs (already fixed in our code)
-6. **NKI kernels break autograd** — use `trnfft.set_backend("pytorch")` fallback
 7. **Single-threaded compilation** — 98% CPU on one core is normal, not stuck
 
 ---
@@ -325,8 +294,6 @@ export XLA_PARAMETER_WRAPPING_THREADSHOLD=50000
 export NEURON_CC_FLAGS="--optlevel 1"
 ```
 
-### "operator aten::unfold ... has no implementation for backend xla:0"
-Update trnfft: `pip install --upgrade git+https://github.com/trnsci/trnfft.git`
 
 ### OOM during compilation
 Use trn1.32xlarge (512GB) or r7i.24xlarge (768GB) for first compile.

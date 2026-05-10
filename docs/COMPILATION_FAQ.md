@@ -120,7 +120,7 @@ Based on our measurements:
 - **Trainium**: 30 min – 8 hrs for FFT-heavy speech models
 
 **Reasons:**
-1. **FFT unrolling**: Pure-PyTorch FFT (via trnfft) expands to hundreds of thousands of ops. At `--optlevel 3` (default), neuronx-cc tries to unroll and fuse aggressively → passes like `PGTiling` (107 min), `AGOrderingAnalysisPass` (68 min) dominate.
+1. **STFT complexity**: STFT operations on large spectrograms generate complex computation graphs. At `--optlevel 3` (default), neuronx-cc performs aggressive optimization passes that can take significant time.
    
 2. **Single-threaded compiler**: neuronx-cc uses one core even on 128-core instances. TPU's compiler may parallelize better internally.
 
