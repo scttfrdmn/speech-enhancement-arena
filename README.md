@@ -4,6 +4,8 @@
 
 A self-contained demo for the ASPIRE group workshop that trains and compares four speech enhancement architectures — simultaneously on MIG-partitioned GPUs or Trainium NeuronCores — then serves a live web demo where you speak into a microphone and hear each model's enhancement in real-time.
 
+> **📖 New to ML hardware selection?** Read [**Hardware Selection Guide**](docs/HARDWARE_SELECTION.md) — learn why L4 spot at $0.39/hr often beats waiting 4 days for a "free" H200, and when to use Trainium vs GPU for training.
+
 ## Architecture
 
 ```
@@ -57,9 +59,15 @@ python serve.py --checkpoint-dir checkpoints --device cpu
 # Open http://localhost:8000 → record audio → hear the difference
 ```
 
-## NVIDIA G7e with MIG
+## AWS g7e with MIG (Recommended for Research)
+
+**Instance**: `g7e.2xlarge` (NVIDIA RTX Pro 6000, Blackwell, 96GB)  
+**Cost**: $3.36/hr on-demand, ~$1.35/hr spot (May 2026 us-west-2)  
+**MIG**: 4× slices (24GB each) = $0.34/hr per experiment
 
 ```bash
+# Launch AWS g7e.2xlarge instance with Deep Learning AMI
+
 # 1. Enable MIG and create 4 partitions
 sudo nvidia-smi -i 0 -mig 1
 sudo nvidia-smi mig -cgi 14,14,14,14 -C
@@ -70,16 +78,22 @@ nvidia-smi -L  # Should show 4x MIG 1g.24gb
 # 3. Install
 pip install -r requirements.txt
 
-# 4. Launch the arena (auto-discovers MIG slices)
+# 4. Launch the arena (auto-discovers MIG slices, runs 4 models in parallel)
 python arena.py --device cuda --epochs 30
 
 # 5. Serve the demo (loads best checkpoints)
 python serve.py --checkpoint-dir checkpoints --device cuda
 ```
 
-## AWS Trainium — TorchNeuron Native (Recommended)
+**Why MIG?** Run all 4 models simultaneously on one instance. Faster than sequential, same cost.
 
-> **Before you launch on Trainium**, read [TRAINIUM_NOTES.md](TRAINIUM_NOTES.md) — compile gotchas we hit the hard way (required env vars, host-RAM minimums, BiGRU refactor, S3 NEFF cache).
+## AWS Trainium — Production Training
+
+**Instance**: `trn1.2xlarge` (Trainium 1st gen, 2 NeuronCores, 32GB)  
+**Cost**: $1.34/hr on-demand, ~$0.54/hr spot (May 2026 us-west-2)  
+**Best for**: Production training of finalized models (after architecture is decided)
+
+> **Before you launch on Trainium**, read [TRAINIUM_QUICKSTART.md](TRAINIUM_QUICKSTART.md) for setup, and [TRAINIUM_NOTES.md](TRAINIUM_NOTES.md) for compile gotchas.
 
 
 ```bash

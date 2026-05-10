@@ -1,6 +1,9 @@
-# Why Does Trainium Require Long Compilation? (vs CUDA/TPU)
+# Why Does Trainium Require Long Compilation? (vs CUDA)
 
-**TL;DR**: Trainium uses **Ahead-of-Time (AOT) graph compilation** like Google TPU, not **Just-in-Time (JIT)** like CUDA. Trade-off: longer upfront compile for optimized execution. Cache once, reuse forever.
+**Last Updated: May 9, 2026**  
+**Pricing: AWS us-west-2 as of May 2026**
+
+**TL;DR**: Trainium uses **Ahead-of-Time (AOT) graph compilation**, not **Just-in-Time (JIT)** like CUDA. Trade-off: longer upfront compile for optimized execution. Cache once, reuse forever.
 
 ---
 
@@ -34,40 +37,7 @@ output = model(input)
 
 ---
 
-### 2. **Google TPU — Ahead-of-Time (AOT) Graph Compilation**
-
-**How it works:**
-- PyTorch/XLA traces your model into a **single graph**
-- XLA compiler does whole-program optimization (fusion, layout, scheduling)
-- Compiles to TPU ISA (similar to Trainium's NEFF)
-- First run: minutes of compilation; cached runs: instant
-
-**Typical experience:**
-```python
-import torch_xla.core.xla_model as xm
-device = xm.xla_device()
-model = MyModel().to(device)
-
-# First forward pass: XLA tracing + compilation (minutes)
-output = model(input)
-xm.mark_step()  # Triggers compilation
-
-# Subsequent passes with same graph: fast (cache hit)
-```
-
-**First-epoch compile:** 5-30 minutes depending on model complexity  
-**Optimization scope:** Whole graph (operator fusion, memory layout, pipeline)  
-**Cache:** HLO → compiled binary cached to disk/GCS
-
-**Why so long?**
-- Whole-program optimization across thousands of ops
-- Finding optimal tensor layouts for TPU's specialized matrix units
-- Aggressive fusion to minimize memory bandwidth
-- Trade compile time for runtime efficiency
-
----
-
-### 3. **AWS Trainium — Ahead-of-Time (AOT) Graph Compilation**
+### 2. **AWS Trainium — Ahead-of-Time (AOT) Graph Compilation**
 
 **How it works:**
 - Same as TPU: PyTorch → XLA graph → Neuron compiler (`neuronx-cc`)
@@ -92,10 +62,12 @@ xm.mark_step()
 **Cache:** HLO → NEFF cached to S3
 
 **Why so long?**
-- Same whole-program optimization as TPU
-- **Additional complexity for FFT/STFT models**: hundreds of thousands of ops from unrolled butterflies
+- Whole-program optimization across thousands of ops
+- Finding optimal tensor layouts for NeuronCore's specialized matrix units
+- **STFT complexity**: STFT operations on large spectrograms generate complex computation graphs
 - NeuronCore-specific scheduling (multi-core placement, tensor parallelism)
 - Single-threaded compiler (neuronx-cc runs one `walrus_driver` process)
+- Aggressive fusion to minimize memory bandwidth
 
 ---
 
