@@ -467,3 +467,219 @@ They're all targeting the **production phase** where workloads are predictable a
 | **Production inference** | AWS Inferentia | inf2.xlarge | $0.30/hr | Lowest $/inference |
 
 **Match the tool to the phase.** Use CUDA's flexibility for research, specialization for production.
+
+---
+
+## Appendix: "But I Need B200 for Memory Bandwidth!"
+
+### The Argument
+
+> "My model is memory-bandwidth-bound, not compute-bound. B200 has 8 TB/s HBM3e vs L4's 300 GB/s. I need the bandwidth!"
+
+**This is still a bad deal for research iteration.**
+
+### The Math
+
+**NVIDIA B200** (hypothetical pricing):
+- Memory bandwidth: 8,000 GB/s (HBM3e)
+- Cost: ~$6-8/hr (estimated based on H200 pricing + premium for Blackwell)
+- Availability: Limited, queue likely
+
+**NVIDIA L4**:
+- Memory bandwidth: 300 GB/s (GDDR6)
+- Cost: $0.39/hr spot
+- Availability: Instant
+
+**Bandwidth ratio**: B200 is 26.7× faster  
+**Cost ratio**: B200 is 15-20× more expensive  
+**Bandwidth per dollar**: L4 is 1.3-1.7× better value
+
+### When Bandwidth Actually Matters
+
+Memory bandwidth limits **inference throughput** and **large-batch training**.
+
+**Example: Transformer inference (memory-bound regime)**
+
+B200 serves:
+- 8,000 GB/s ÷ (model size × tokens/request) = requests/sec
+
+L4 serves:
+- 300 GB/s ÷ (model size × tokens/request) = requests/sec (26× slower)
+
+**But for research iteration**, you're not serving production traffic. You're running:
+- Single forward passes to test architecture changes
+- Small-batch training to validate hyperparameters
+- Debugging model behavior
+
+**Your bottleneck is think time, not bandwidth.**
+
+### The Queue Problem Persists
+
+Even if B200 gives 26× more bandwidth:
+
+**Scenario**: Your experiment is bandwidth-bound and takes 60 minutes on L4.
+
+**B200** (ideal case, no queue):
+- Run time: 60 min ÷ 26 = 2.3 minutes
+- Saved: 57.7 minutes
+
+**B200** (realistic case, 4-day queue):
+- Queue: 5,760 minutes
+- Run time: 2.3 minutes
+- Total: 5,762.3 minutes
+
+**L4** (instant):
+- Queue: 0 minutes
+- Run time: 60 minutes
+- Total: 60 minutes
+
+**L4 is still 96× faster to results** despite 26× lower bandwidth.
+
+### The Parallelism Alternative
+
+**Instead of 1× B200 for 2.3 minutes:**
+
+Launch **5× L4 instances** in parallel:
+- Each runs same experiment with different hyperparameters
+- Each takes 60 minutes
+- Total time: 60 minutes (parallel)
+- Total cost: 5 × 1 hour × $0.39 = $1.95
+- **You explored 5× more of the parameter space**
+
+vs
+
+**1× B200** (assuming you could get one instantly):
+- Runs 1 experiment in 2.3 minutes
+- To match 5 experiments: 5 × 2.3 min = 11.5 minutes
+- Cost: ~$1.15
+- **Slightly cheaper, but you waited for B200 availability**
+
+**Reality check**: If B200 has even a 1-hour queue, L4 parallel wins.
+
+### When B200 Actually Makes Sense
+
+✅ **Yes - Use B200/H200 when:**
+
+1. **Production inference at scale**
+   - Serving millions of requests/day
+   - Bandwidth directly = revenue
+   - Can amortize over 24/7 utilization
+   
+2. **Multi-GPU training (model parallel)**
+   - Model >80GB, doesn't fit on smaller GPUs
+   - Training for days continuously
+   - Bandwidth between GPUs matters (NVLink)
+
+3. **Research on bandwidth-limited operations**
+   - Specifically studying memory hierarchy
+   - Developing new attention mechanisms
+   - Need ground-truth "what if bandwidth was infinite?" baseline
+
+❌ **No - Don't use B200 for:**
+
+- Prototyping models that fit on 24GB L4
+- Debugging model convergence
+- Hyperparameter sweeps (use many cheap GPUs)
+- Anything with a queue >1 hour
+
+### The Reality: Most Models Aren't Bandwidth-Bound During Research
+
+**Typical research iteration:**
+```python
+# Your actual workflow
+for epoch in range(30):
+    for batch in dataloader:  # ← Compute bound
+        loss = model(batch)   # ← Mostly compute bound
+        loss.backward()       # ← Compute bound
+        optimizer.step()      # ← Small bandwidth component
+        
+        # You spend most time here:
+        if step % 100 == 0:
+            print(f"Loss: {loss.item()}")  # ← Looking at results
+            # Thinking: "Hmm, not converging, maybe lower LR?"
+```
+
+**Time breakdown** (typical research experiment):
+- Thinking about results: 60%
+- Waiting for training: 30%
+- Actually bandwidth-limited: 10%
+
+**Even if B200 eliminates 100% of bandwidth bottleneck:**
+- Saves: 10% of 30% = 3% of total time
+- L4 experiment: 60 minutes → B200: 58.2 minutes
+- **Negligible improvement for research velocity**
+
+### Bandwidth Per Dollar Analysis
+
+**Bandwidth you can rent for $10:**
+
+**B200** @ ~$7/hr:
+- 1.4 hours × 8,000 GB/s = 11,200 GB-seconds/dollar
+- Or: 8,000 GB/s for 1.4 hours
+
+**L4** @ $0.39/hr:
+- 25.6 hours × 300 GB/s = 7,680 GB-seconds/dollar
+- Or: 300 GB/s for 25.6 hours
+- Or: **25× L4s in parallel = 7,500 GB/s for 1 hour**
+
+**For $10, you can get:**
+- 1× B200 for 1.4 hours (8,000 GB/s)
+- 25× L4 for 1 hour (7,500 GB/s aggregate)
+
+**The L4 cluster gives nearly the same aggregate bandwidth**, plus:
+- 25× parallel experiments
+- 25× search of parameter space
+- No queue
+
+### The Production Transition
+
+**When you move to production**, B200 makes sense:
+
+**Research phase** (architecture exploration):
+- Use L4: $0.39/hr, instant
+- Run 100 experiments in parallel
+- Find best architecture
+- Total cost: $39 (100 hrs of L4)
+
+**Production phase** (training finalized model):
+- Use reserved B200: $7/hr, no queue
+- Train for 200 hours straight
+- Bandwidth saves 20% time vs L4 (40 hours)
+- Cost: $1,400 vs $1,800 on L4
+- Saved: $400
+
+**Total cost**: $39 (research) + $1,400 (production) = $1,439
+
+vs
+
+**All on B200** (if you could get queue-free access):
+- Research: 100 experiments × 2 min = 3.3 hours @ $7/hr = $23
+- Production: 160 hours @ $7/hr = $1,120
+- Total: $1,143
+
+**Savings: $296**
+
+**But**: That assumes zero queue time. Add even 1 day of queue time for those 100 research experiments:
+- 100 experiments × 1 day queue = 100 days blocked
+- Cost of your time: 100 days × 8 hrs × $50/hr = $40,000
+
+**The L4 path saves you $40,000 - $296 = $39,704.**
+
+### The Bottom Line
+
+**"I need B200 for bandwidth" is almost never true for research iteration.**
+
+**Truth:**
+- You need fast feedback (instant launch beats high bandwidth)
+- You need parallel search (many cheap GPUs beat one fast GPU)
+- You need availability (no queue)
+
+**B200 is for production workloads where:**
+- Model is finalized
+- Training for days continuously
+- Serving at scale 24/7
+- Every ms of latency = $$$
+
+**For research**: Use L4 until you have queue-free access to B200 *and* your workload is genuinely bandwidth-bound in the regime you're operating in.
+
+**Rule of thumb:** If your experiment runs <4 hours, bandwidth doesn't matter. Use the GPU you can get right now.
