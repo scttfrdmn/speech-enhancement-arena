@@ -179,7 +179,61 @@ Cost per month (30 retrainings):
 
 ---
 
-### Concrete Use Case 5: **Research on Trainium Itself**
+### Concrete Use Case 5: **Large-Scale Batched Inference**
+
+**Scenario:** Process 1 million images/documents through a model (one-time batch job, not serving).
+
+**Why Trainium fits:**
+- **Model frozen** (inference only, no training)
+- **Large batch:** Process millions of samples
+- **Compile once:** Model graph never changes
+- **Run for hours:** Even at 1000 samples/sec, takes >15 minutes
+- **Cost matters:** Doing this on H100 costs 6× more
+
+**Workflow:**
+```
+Setup (one-time):
+├─ Compile model for inference on Trainium: 1-2 hours
+├─ Optimize batch size for throughput
+└─ Save NEFF to S3
+
+Batch job:
+├─ Load NEFF: 30 seconds
+├─ Process 1M images through ResNet-50: 3 hours
+└─ Save predictions to S3
+
+Cost:
+├─ Trainium: 3 hours × $0.54/hr = $1.62
+└─ vs H100: 1 hour × $3.13/hr = $3.13 (faster but 93% more expensive)
+└─ vs Inferentia2: 6 hours × $0.30/hr = $1.80 (slower but cheaper)
+```
+
+**When this makes sense:**
+- ✅ Batch processing (not real-time serving)
+- ✅ Large dataset (>10K samples)
+- ✅ Don't need sub-second latency
+- ✅ Cost optimization matters
+
+**When this doesn't make sense:**
+- ❌ Real-time serving (use Inferentia2 instead)
+- ❌ Small dataset (<1K samples) - compilation overhead dominates
+- ❌ Model changes between batches (constant recompilation)
+
+**Academic examples:**
+- **Genomics:** Annotate 1M protein sequences with AlphaFold
+- **Astronomy:** Classify 500K galaxy images from telescope survey
+- **Social science:** Sentiment analysis on 10M historical tweets
+- **Medical research:** Screen 100K pathology slides for anomalies
+- **Climate science:** Process 50 years of satellite imagery
+
+**Key insight:** Trainium is cheaper than GPU for batch inference when:
+- Batch takes >2 hours (amortizes compilation)
+- Cost matters more than speed
+- But use Inferentia2 if workload is pure inference (no training ever)
+
+---
+
+### Concrete Use Case 6: **Research on Trainium Itself**
 
 **Scenario:** Computer architecture research studying custom silicon.
 
