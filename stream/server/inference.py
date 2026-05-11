@@ -121,14 +121,18 @@ def load_all_models(checkpoint_dir: Path, device: torch.device) -> None:
     log.info("default model: %s  |  available: %s", DEFAULT_MODEL, list(MODELS))
 
     # Warm up every model with a dummy forward so the first real WebSocket
-    # connection doesn't pay the CUDA kernel-compile cost (~5 s on L40S).
-    if device.type in ("cuda", "mps"):
+    # connection doesn't pay the CUDA kernel-compile cost (~5 s on L40S)
+    # or XLA compilation cost (2-8 hours, but should be cached).
+    if device.type in ("cuda", "mps", "xla"):
         dummy = torch.zeros(1, int(CONTEXT_SECS * MODEL_RATE), device=device)
         for key, model in MODELS.items():
             with torch.no_grad():
                 _ = model(dummy)
             if device.type == "cuda":
                 torch.cuda.synchronize()
+            elif device.type == "xla":
+                import torch_xla.core.xla_model as xm
+                xm.mark_step()
             log.info("warmed up %s", key)
         log.info("all models warmed up")
 
@@ -256,6 +260,12 @@ async def ws_infer(ws: WebSocket, model: str = "") -> None:
             t0 = time.perf_counter()
             with torch.no_grad():
                 enhanced = active_model(model_input.unsqueeze(0)).squeeze(0)
+
+            # XLA synchronization point (for Trainium/TPU)
+            if DEVICE.type == "xla":
+                import torch_xla.core.xla_model as xm
+                xm.mark_step()
+
             t_forward = (time.perf_counter() - t0) * 1000.0
 
             # Take hop_samples from slightly inside the output tail.
@@ -303,7 +313,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--checkpoint-dir", type=Path, required=True)
     parser.add_argument("--device", default="cpu",
-                        choices=["cpu", "mps", "cuda"])
+                        choices=["cpu", "mps", "cuda", "xla", "neuron"])
     parser.add_argument("--context", type=float, default=0.5,
                         help="Seconds of history fed to the model each forward pass")
     parser.add_argument("--hop", type=float, default=0.1,
@@ -314,10 +324,26 @@ def main() -> None:
                         help="Sample rate the browser client ships (ctx.sampleRate)")
     parser.add_argument("--model-rate", type=int, default=16000,
                         help="Model's native sample rate (16 kHz for all arena models)")
+    parser.add_argument("--demo-noise", default=None,
+                        choices=["cafeteria", "traffic", "white"],
+                        help="Add synthetic noise for dramatic demo (makes enhancement obvious)")
+    parser.add_argument("--demo-bypass", action="store_true",
+                        help="Bypass mode: echo raw input without enhancement")
     args = parser.parse_args()
 
     global DEVICE, CONTEXT_SECS, HOP_SECS, INPUT_BOOST, CAPTURE_RATE, MODEL_RATE
-    DEVICE = torch.device(args.device)
+
+    # Handle XLA/Neuron device creation
+    if args.device in ("xla", "neuron"):
+        if args.device == "xla":
+            import torch_xla.core.xla_model as xm
+            DEVICE = xm.xla_device()
+            log.info("Using XLA device (Trainium/TPU)")
+        else:
+            DEVICE = torch.device("neuron")
+            log.info("Using Neuron device (Trainium native)")
+    else:
+        DEVICE = torch.device(args.device)
     CONTEXT_SECS = args.context
     HOP_SECS = args.hop
     INPUT_BOOST = args.input_boost
