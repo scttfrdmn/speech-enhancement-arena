@@ -83,7 +83,25 @@ export NEURON_COMPILE_CACHE_URL=s3://your-bucket/trn1-xla/
 
 Arena's seed cache: `s3://aws-arena-neuron-cache-scttfrdmn/trn1-xla/` (509 MB, 43 NEFFs covering all 4 models). Downstream users hit S3 and get compile-free runs.
 
-### 10. trn2.* is Capacity-Blocks-for-ML only
+**Gotcha — cache is keyed on compiler version.** The S3 path includes `neuronxcc-<VERSION>+<HASH>/`. When AWS bumps the public DLAMI to a new Neuron SDK, the cache key changes and a fresh `trn1.2xlarge` will trigger a full recompile — which **OOMs on trn1.2xlarge's 32 GB host RAM** for this workload. Pin a private AMI from a known-good DLAMI+toolchain combo (see #10 below) so demo-day launches don't surprise you with a multi-hour rebuild.
+
+### 10. Cut a personal AMI to lock the toolchain
+
+Public Neuron DLAMIs roll forward every few weeks. Each release ships the latest Neuron SDK, which changes `neuronx-cc` and invalidates the NEFF cache key. Combined with the trn1.2xlarge OOM-on-compile constraint, an unexpected SDK bump on demo day is fatal.
+
+**Solution:** after a successful compile run on `r7i.24xlarge`, snapshot the instance as a private AMI and pin to it in your launch scripts.
+
+```bash
+aws ec2 create-image \
+  --instance-id i-<r7i-instance> \
+  --name "arena-trn1-pinned-$(date +%Y%m%d)" \
+  --description "Frozen toolchain. Neuron SDK 2.29.1, neuronx-cc <VERSION>. NEFF cache: s3://aws-arena-neuron-cache-scttfrdmn/trn1-xla-2.29.1/" \
+  --no-reboot
+```
+
+Use that AMI ID for both the compile host (`r7i.24xlarge`) and the serving host (`trn1.2xlarge`) — they share the toolchain, so they should share the AMI. Re-cut only when you intentionally want a new compiler version. Compiler stability beats SDK currency for any workload that lives off a NEFF cache.
+
+### 11. trn2.* is Capacity-Blocks-for-ML only
 
 All trn2 instance sizes (`trn2.3xlarge`, `trn2.48xlarge`, etc.) are **reservation-only** via [Capacity Blocks for ML](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html). `aws ec2 run-instances` without a CBML reservation will always return `InsufficientInstanceCapacity`, and `describe-instance-types` hides the sizes you don't have a reservation for (looks like they don't exist).
 
@@ -91,7 +109,7 @@ All trn2 instance sizes (`trn2.3xlarge`, `trn2.48xlarge`, etc.) are **reservatio
 - Launch during the reserved window with `--market-type capacity-block --capacity-reservation-specification CapacityReservationTarget=...`.
 - Plan any trn2 benchmark **days in advance**. You can't just launch one ad hoc like with trn1.
 
-### 11. If compile looks stuck, check the latest compile log
+### 12. If compile looks stuck, check the latest compile log
 
 ```bash
 ls -t /tmp/ubuntu/neuroncc_compile_workdir/*/log-neuron-cc.txt | head -1 | xargs tail

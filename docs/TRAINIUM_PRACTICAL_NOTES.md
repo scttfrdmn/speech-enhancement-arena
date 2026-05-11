@@ -95,6 +95,41 @@ Use the simulator for "does this code work at all" and Trainium for "how fast is
 
 ---
 
+## 4. Pin a Personal AMI to Lock the Compiler Version
+
+The NEFF cache is keyed on compiler version: `s3://your-bucket/.../neuronxcc-<VERSION>+<HASH>/MODULE_<hash>/...`. When AWS releases a new Neuron SDK (which they do every few weeks), the public DLAMI ships the new compiler, the cache key changes, and your existing NEFFs are stranded. A fresh `trn1.2xlarge` from the latest DLAMI will trigger a full recompile.
+
+**That recompile fails on `trn1.2xlarge` for non-trivial workloads.** The 32 GB host RAM can't hold the Neuron compiler's whole-graph IR; you hit OOM in `neuronx-cc` mid-Tensorizer and the only recovery is cross-compiling on an `r7i.24xlarge` and uploading fresh NEFFs. Hours of work, no demo.
+
+### The fix
+
+Once you have a working setup — DLAMI + compiled NEFFs in S3 — **snapshot the instance as a private AMI** and pin to that AMI ID in your launch scripts. The compiler version is frozen, the cache keys stay valid, and a future launch is 30 seconds instead of a multi-hour rebuild.
+
+```bash
+# After your r7i.24xlarge compile run finishes and NEFFs are in S3:
+aws ec2 create-image \
+  --instance-id i-xxx \
+  --name "arena-trn1-pinned-$(date +%Y%m%d)" \
+  --description "DLAMI + compiled toolchain. Neuron SDK 2.29.1. NEFF cache: s3://aws-arena-neuron-cache-scttfrdmn/trn1-xla-2.29.1/" \
+  --no-reboot
+
+# Use the resulting AMI ID for all future demo launches:
+aws ec2 run-instances --image-id ami-<your-snapshot> --instance-type trn1.2xlarge ...
+```
+
+The AMI captures the Neuron SDK, `neuronx-cc` compiler, Python venv, and any other preinstalled dependencies. When you launch from it, the compiler version stays frozen at 2.29.1 (or whatever you snapshot) regardless of what AWS ships in the public DLAMI catalog.
+
+### When to re-cut the AMI
+
+Only when you *intentionally* want a new compiler version:
+- A bugfix lands in a newer Neuron SDK that affects your model
+- You're starting a fresh project and want the current toolchain
+- The AMI accumulates other staleness you care about (security patches, etc.)
+
+Otherwise leave it. **Compiler stability is more valuable than running the latest SDK** for any workload that lives off a NEFF cache. This is the one place where "stale but working" beats "current but broken."
+
+---
+
 ## Updated Decision Tree
 
 Given these three tools, the practical Trainium workflow for academic researchers is:
