@@ -6,7 +6,7 @@ A self-contained demo for the ASPIRE group workshop that trains and compares fou
 
 > **📖 New to ML hardware selection?** Read [**Hardware Selection Guide**](docs/HARDWARE_SELECTION.md) — learn why L4 spot at $0.39/hr often beats waiting 4 days for a "free" H200, and when to use Trainium vs GPU for training.
 >
-> **📺 Running the live demo?** Step-by-step walk-through in [**docs/LIVE_DEMO_STEPS.md**](docs/LIVE_DEMO_STEPS.md) (g7e MIG vs Trainium, side-by-side mic→enhancement→speaker on one browser tab).
+> **📺 Want to try the demo?** Train models with `arena.py`, then run the streaming inference server (`stream/server/inference.py`) and open the browser UI — mic → enhancement → speakers, live. See the "Workshop Flow" section below.
 
 ## Architecture
 
@@ -87,7 +87,7 @@ python arena.py --device cuda --epochs 30
 uv run python stream/server/inference.py --checkpoint-dir checkpoints --device cuda --port 8765
 ```
 
-Full demo walk-through in [`docs/LIVE_DEMO_STEPS.md`](docs/LIVE_DEMO_STEPS.md).
+Open `http://<host>:8765` in a browser. Click **Start** to stream from your mic; the model runs in real time and the enhanced audio plays back through your speakers.
 
 **Why MIG?** Run all 4 models simultaneously on one instance. Faster than sequential, same cost.
 
@@ -204,7 +204,7 @@ speech-enhancement-arena/
 
 1. **Train on NVIDIA (15 min):** Run `arena.py --device cuda` — watch 4 models race on 4 MIG slices
 2. **Compare (5 min):** See the scoreboard — which architecture won?
-3. **Listen (10 min):** Run `stream/server/inference.py` — speak into the mic, hear each model clean it in real time. Walk-through in [`docs/LIVE_DEMO_STEPS.md`](docs/LIVE_DEMO_STEPS.md).
+3. **Listen (10 min):** Run `stream/server/inference.py` — speak into the mic, hear each model clean it in real time.
 4. **Train on Trainium (15 min):** Run `arena.py --device neuron --compile` — same code, different silicon
 5. **Compare across hardware (5 min):** NVIDIA vs. Trainium — training time, cost, quality
 6. **Discuss:** Why did CRM beat magnitude masking? Why is attention slower but sometimes better? What would torch.compile + NKI kernels unlock?

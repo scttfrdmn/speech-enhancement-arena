@@ -33,3 +33,6 @@ Thumbs.db
 # Archive
 *.tar.gz
 *.zip
+
+# Presenter / BD-internal material (not distributed)
+internal/
