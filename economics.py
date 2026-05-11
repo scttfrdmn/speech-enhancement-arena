@@ -82,6 +82,20 @@ INSTANCE_CATALOG = {
         family="nvidia",
         notes="Previous gen, no MIG, good price/perf for single experiments",
     ),
+    "g6.xlarge": InstanceSpec(
+        name="g6.xlarge",
+        price_on_demand=0.98,
+        price_spot=0.39,
+        accelerator="L4",
+        accel_count=1,
+        accel_memory_gb=24,
+        fp16_tflops=30.3,
+        supports_mig=False,
+        mig_slices=0,
+        mig_memory_gb=0,
+        family="nvidia",
+        notes="Ada Lovelace, cheapest CUDA option, one experiment at a time",
+    ),
     "g5.2xlarge": InstanceSpec(
         name="g5.2xlarge",
         price_on_demand=1.21,
@@ -593,6 +607,9 @@ def print_right_sizing():
     print(f"  │  g7e.2xlarge MIG   24 GB     ~4%               96% idle        │")
     print(f"  │    1× MIG slice    (×4)      (but 4 models!)   $0.84/hr/model  │")
     print(f"  │                                                                │")
+    print(f"  │  g6.xlarge         24 GB     ~4%               96% idle        │")
+    print(f"  │    1× L4                                       $0.98/hr        │")
+    print(f"  │                                                                │")
     print(f"  │  g5.2xlarge        24 GB     ~4%               96% idle        │")
     print(f"  │    1× A10G                                     $1.21/hr        │")
     print(f"  │                                                                │")
@@ -601,7 +618,7 @@ def print_right_sizing():
     print(f"  └─────────────────────────────────────────────────────────────────┘")
 
     print(f"\n  None of these instances are fully utilized by a 3M param model.")
-    print(f"  But the cost difference is 25×: $32.77/hr vs $1.21/hr.")
+    print(f"  But the cost difference is 33×: $32.77/hr vs $0.98/hr.")
     print(f"  With MIG, you get 4 experiments for $3.36/hr total — $0.84 each.")
     print()
     print(f"  The right question isn't 'what's the fastest GPU?'")
@@ -609,7 +626,7 @@ def print_right_sizing():
     print()
     print(f"  For 1-4M param speech enhancement models:")
     print(f"    • Ablation sweeps → G7e MIG (4 parallel, $0.84/hr each)")
-    print(f"    • Single experiment → G5 Spot ($0.48/hr) or Trn1 ($0.54/hr)")
+    print(f"    • Single experiment → L4 Spot ($0.39/hr), A10G Spot ($0.48/hr), or Trn1 ($0.54/hr)")
     print(f"    • Final training run → G7e full GPU ($3.36/hr) for fastest time")
     print(f"    • Foundation model → Trn2 ($16/hr) — this is where the big iron pays off")
     print()
