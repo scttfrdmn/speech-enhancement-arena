@@ -25,14 +25,16 @@
 
 ## 2. Model Architectures
 
-| Model | Params | Architecture | Description |
-|---|---|---|---|
-| **ConvMaskNet** | 47.5M | U-Net encoder-decoder with skip connections | Magnitude mask, baseline |
-| **CRMNet** | 25.2M | Dilated TCN with residual blocks | Complex Ratio Mask (Williamson & Wang 2017) |
-| **AttentionMask** | 33.1M | 10-layer Transformer + positional encoding | SWIM-inspired (ASPIRE 2024) |
-| **GatedRecurrent** | 19.7M | 4-layer BiGRU with Conv pre/post-nets | Nayem & Williamson style |
+These benchmarks ran against `--scale large` (n_fft=1024).
 
-All models operate in the STFT domain with n_fft=1024, estimate masks, and reconstruct via iSTFT.
+| Model | Params (run) | Params (current `--scale large`) | Architecture | Description |
+|---|---|---|---|---|
+| **ConvMaskNet** | 47.5M | 47.5M | U-Net encoder-decoder with skip connections | Magnitude mask, baseline |
+| **CRMNet** | 25.2M | 25.2M | Dilated TCN with residual blocks | Complex Ratio Mask (Williamson & Wang 2017) |
+| **AttentionMask** | 33.1M | 33.1M | 10-layer Transformer + positional encoding | SWIM-inspired (ASPIRE 2024) |
+| **GatedRecurrent** | 19.7M | 15.0M | 4-layer BiGRU with Conv pre/post-nets | Nayem & Williamson style |
+
+All models operate in the STFT domain, estimate masks, and reconstruct via iSTFT. `--scale small` (n_fft=512, 2–5M params) is the default for the workshop demo; benchmarks below use `--scale large` (n_fft=1024). The GatedRecurrent param count drifted from 19.7M to 15.0M after the trnfft removal commit reshaped the model — throughput numbers below should be accurate within a few percent; loss values may shift slightly on a re-run against current code.
 
 ---
 

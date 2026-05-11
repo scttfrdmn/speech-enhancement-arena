@@ -111,7 +111,12 @@ def load_models(checkpoint_dir, device_str="cpu"):
             stft_procs[model_key] = STFTProcessor(n_fft=512, hop_length=128)
             print(f"  [random] {model_key} (no checkpoint found, using random weights)")
 
-    print(f"\n  {len(loaded_models)} models ready for inference.")
+    trained = sum(1 for info in loaded_models.values() if info["epoch"] is not None)
+    untrained = len(loaded_models) - trained
+    print(f"\n  {len(loaded_models)} models ready for inference ({trained} trained, {untrained} random-weights).")
+    if untrained > 0:
+        print(f"  WARNING: {untrained} model(s) have NO trained weights and will produce noise.")
+        print(f"           Run `python arena.py` first, or pass --checkpoint-dir <path>.")
 
 
 # ---------------------------------------------------------------------------
@@ -161,12 +166,16 @@ def add_noise(audio, noise_type="white", snr_db=5):
     return audio + noise
 
 
-def compute_spectrogram(audio, sr=16000):
-    """Compute log-magnitude spectrogram for visualization."""
-    X = stft_proc.stft(audio.unsqueeze(0) if audio.dim() == 1 else audio)
+def compute_spectrogram(audio, sr=16000, proc=None):
+    """Compute log-magnitude spectrogram for visualization.
+
+    Pass a per-model STFTProcessor via `proc` to match its n_fft;
+    falls back to the default 512-bin processor when None.
+    """
+    p = proc if proc is not None else stft_proc
+    X = p.stft(audio.unsqueeze(0) if audio.dim() == 1 else audio)
     mag = X.abs().squeeze(0).cpu().numpy()
     log_mag = np.log10(mag + 1e-8)
-    # Normalize to [0, 1] for visualization
     log_mag = (log_mag - log_mag.min()) / (log_mag.max() - log_mag.min() + 1e-8)
     return log_mag
 
@@ -285,8 +294,9 @@ async def enhance_audio(
             enhanced = model(noisy.unsqueeze(0)).squeeze(0)
         inference_time = time.time() - t0
 
-        # Compute spectrograms
-        spec = compute_spectrogram(enhanced)
+        # Use the per-model STFTProcessor so spectrogram resolution
+        # matches what the model itself sees.
+        spec = compute_spectrogram(enhanced, proc=stft_procs.get(model_key))
 
         results[model_key] = {
             "name": model.name,

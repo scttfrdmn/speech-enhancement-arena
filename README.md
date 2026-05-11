@@ -45,7 +45,7 @@ A self-contained demo for the ASPIRE group workshop that trains and compares fou
 | **AttentionMask** | Transformer mask estimator | 3.6M / 33.1M | SWIM (ASPIRE, 2024) |
 | **GatedRecurrent** | Deep BiGRU mask | 2.2M / 15.0M | Nayem & Williamson (IEEE TASLP, 2024) |
 
-All models operate in the STFT domain, estimate masks, and reconstruct via iSTFT — exactly the ASPIRE pipeline. `--scale small` (n_fft=512) is the default; `--scale large` (n_fft=1024) is for production-quality benchmarks.
+All models operate in the STFT (Short-Time Fourier Transform) domain: the noisy waveform is decomposed into time-frequency bins, the model predicts a per-bin mask that suppresses noise, and the masked spectrogram is inverted back to audio via iSTFT — exactly the ASPIRE pipeline. `--scale small` (n_fft=512) is the default; `--scale large` (n_fft=1024) is for production-quality benchmarks.
 
 ## Quick Start (CPU, for testing)
 
@@ -54,7 +54,7 @@ All models operate in the STFT domain, estimate masks, and reconstruct via iSTFT
 uv sync
 # Or pip:  pip install -r requirements.txt
 
-# Train all 4 models (CPU, fast test)
+# Train all 4 models (CPU, fast test) — checkpoints written to ./checkpoints/
 uv run python arena.py --device cpu --epochs 5 --num-samples 500
 
 # Launch the live streaming demo (mic → model → speakers)
@@ -99,6 +99,8 @@ Open `http://<host>:8765` in a browser. Click **Start** to stream from your mic;
 **Cost**: $1.34/hr on-demand, ~$0.54/hr spot (May 2026 us-west-2)  
 **Best for**: Production training of finalized models (after architecture is decided)
 
+> ⚠️ **First-time compile on `trn1.2xlarge` will OOM.** Its 32 GB host RAM isn't enough to hold the Neuron compiler's whole-graph IR. **Compile on a cheap x86 instance (`r7i.24xlarge`, 768 GB RAM, $6.36/hr OD), upload NEFFs to S3, then run on `trn1.2xlarge`.** See [`docs/TRAINIUM_PRACTICAL_NOTES.md`](docs/TRAINIUM_PRACTICAL_NOTES.md) for the full cross-compile workflow, plus the Bedrock-Distillation and Neuron-simulator paths.
+>
 > **Before you launch on Trainium**, read [TRAINIUM_QUICKSTART.md](TRAINIUM_QUICKSTART.md) for setup, and [TRAINIUM_NOTES.md](TRAINIUM_NOTES.md) for compile gotchas.
 
 

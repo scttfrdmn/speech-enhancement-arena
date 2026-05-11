@@ -13,8 +13,8 @@ All models operate in the STFT domain, estimate masks, and reconstruct
 enhanced audio — exactly the pipeline ASPIRE uses.
 
 Scale modes:
-  - "small"  — 1-4M params (quick testing, workshop demos)
-  - "large"  — 25-80M params (real benchmarks, GPU stress testing)
+  - "small"  — 2-5M params (quick testing, workshop demos)
+  - "large"  — 15-48M params (real benchmarks, GPU stress testing)
 """
 
 import torch
@@ -97,7 +97,7 @@ class ConvMaskNet(nn.Module):
     Convolutional U-Net encoder-decoder that estimates a magnitude mask.
     Skip connections between encoder and decoder at each depth level.
 
-    Small: ~1.4M params | Large: ~25M params
+    Small: 5.0M params | Large: 47.5M params
     """
     name = "ConvMaskNet"
     description = "Conv U-Net encoder-decoder, magnitude mask"
@@ -194,7 +194,7 @@ class CRMNet(nn.Module):
     Dilated Temporal Convolutional Network estimating a complex ratio mask.
     Inspired by Williamson & Wang (IEEE TASLP, 2017) and Conv-TasNet.
 
-    Small: ~2.8M params | Large: ~45M params
+    Small: 2.8M params | Large: 25.2M params
     """
     name = "CRMNet"
     description = "Dilated TCN, Complex Ratio Mask (Williamson & Wang 2017)"
@@ -269,7 +269,7 @@ class AttentionMask(nn.Module):
     Transformer-based mask estimation using multi-head self-attention
     over time frames. Inspired by ASPIRE's SWIM model (2024).
 
-    Small: ~3.3M params | Large: ~80M params
+    Small: 3.6M params | Large: 33.1M params
     """
     name = "AttentionMask"
     description = "Transformer mask (SWIM-inspired)"
@@ -330,7 +330,7 @@ class GatedRecurrent(nn.Module):
     Deep Bidirectional GRU with Conv pre/post-nets for mask estimation.
     Inspired by Nayem & Williamson (ICASSP 2020, IEEE TASLP 2024).
 
-    Small: ~2.1M params | Large: ~35M params
+    Small: 2.2M params | Large: 15.0M params
     """
     name = "GatedRecurrent"
     description = "Deep BiGRU mask (Nayem & Williamson)"
@@ -400,7 +400,7 @@ def get_model(name, scale="small", n_fft=None, **kwargs):
 
     Args:
         name: model key from MODEL_REGISTRY
-        scale: "small" (1-4M params) or "large" (25-80M params)
+        scale: "small" (2-5M params) or "large" (15-48M params)
         n_fft: override n_fft from scale config
         **kwargs: additional overrides passed to model constructor
     """
