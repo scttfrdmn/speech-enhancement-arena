@@ -95,7 +95,46 @@ Use the simulator for "does this code work at all" and Trainium for "how fast is
 
 ---
 
-## 4. Pin a Personal AMI to Lock the Compiler Version
+## 4. Two paths for STFT/FFT models: XLA whole-graph vs. native-with-CPU-partition
+
+For workloads that include FFT/STFT, the choice between the legacy XLA path and the current `torch_neuronx.trace()` native path is not just "old vs new" — it's a meaningful **runtime vs compile-time** tradeoff. Both work; they cost differently.
+
+### Path A — Legacy XLA (`--device xla`)
+
+torch_xla emits HLO IR for every op, including the Cooley-Tukey butterflies of `torch.stft`. The Neuron compiler unrolls this into a graph of hundreds of thousands of ops and produces a single NEFF that runs **entirely on NeuronCore**, FFT included.
+
+- **Pros:** Full computation on Trainium silicon. No host↔Neuron transitions per forward. Best steady-state inference throughput.
+- **Cons:** Compile is brutal — hours to days. The arena's GRU compile hit 14 hours with `--optlevel 3` before we capped it at `--optlevel 1` and got bounded (still-slow) compilation. See §3 of `TRAINIUM_NOTES.md`.
+- **Mitigation:** Compile once on `r7i.24xlarge`, cache NEFFs in S3 (`NEURON_COMPILE_CACHE_URL=s3://...`). Subsequent loads are seconds. **This is what the arena's `s3://aws-arena-neuron-cache-scttfrdmn/trn1-xla/` cache is** — 509 MB of NEFFs from April 2026, 4-models-fully-on-Neuron.
+- **Status:** Deprecated. AWS is moving off `torch_xla` for Trainium in favor of native `torch_neuronx`.
+
+### Path B — Native `torch_neuronx.trace()` (current)
+
+`torch.stft` isn't lowerable to NeuronCore in the native path. You handle this one of two ways:
+
+1. **`PartitionerConfig` (automatic):** `torch_neuronx.PartitionerConfig(ops_to_partition={"aten::stft", "aten::istft", ...})` automatically ships the unsupported ops to host CPU, compiles the rest for Neuron, wires them together as a single ScriptModule.
+2. **Manual core extraction (cleaner):** Refactor each model into a `Core` submodule that takes a magnitude/[real|imag] tensor and returns a mask — no STFT inside. Trace just the core. The host runs STFT/iSTFT on CPU around the traced call. See `scripts/trace_for_neuron.py`.
+
+Either way, FFT runs on host CPU, not NeuronCore.
+
+- **Pros:** Compile time drops to minutes (no whole-graph FFT unrolling). Fast iteration. No `r7i.24xlarge` needed for compilation.
+- **Cons:** Per-forward overhead: STFT/iSTFT on CPU + host↔Neuron data transfers across the partition boundary. Empirically ~10–15 ms added per forward for this workload (out of ~100 ms total — 10–15%).
+- **Status:** Supported. The path AWS is investing in.
+
+### Which path when
+
+| You care most about... | Path |
+|---|---|
+| Steady-state inference $/request, FFT in the model, will serve for months | A (XLA) — pay the compile cost once, get full Trainium runtime |
+| Fast iteration, model architecture still changing, exploratory work | B (native) — minutes-not-hours compile, accept the partition overhead |
+| Reproducibility across SDK upgrades | A (NEFFs are stable artifacts) or B + pin AMI per §5 |
+| Just want it to work tomorrow | B with manual core extraction (`scripts/trace_for_neuron.py`) |
+
+The deprecation of `torch_xla` for Trainium is a real **capability tradeoff**, not a pure improvement. The native API is faster to develop against; the XLA API was more capable for ops outside the dense-linear-algebra family. Both have legitimate use cases. Workshop attendees evaluating Trainium for FFT-heavy workloads should hear this honestly.
+
+---
+
+## 5. Pin a Personal AMI to Lock the Compiler Version
 
 The NEFF cache is keyed on compiler version: `s3://your-bucket/.../neuronxcc-<VERSION>+<HASH>/MODULE_<hash>/...`. When AWS releases a new Neuron SDK (which they do every few weeks), the public DLAMI ships the new compiler, the cache key changes, and your existing NEFFs are stranded. A fresh `trn1.2xlarge` from the latest DLAMI will trigger a full recompile.
 
