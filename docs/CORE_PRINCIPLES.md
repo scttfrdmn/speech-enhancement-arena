@@ -454,7 +454,7 @@ They're all targeting the **production phase** where workloads are predictable a
 
 - **Parallel search** is 10× faster than sequential on better hardware
 - Launch 100 GPUs for 1 hour = same cost as 1 GPU for 100 hours
-- Your time has value: waiting costs more than cloud credits
+- Your time has value: waiting costs more than the cloud bill
 
 ### When to Use What
 

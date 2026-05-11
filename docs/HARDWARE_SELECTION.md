@@ -466,7 +466,7 @@ All models: STFT-domain, n_fft=1024, 30 epochs, batch_size=16
 - No VRAM elasticity (stuck at 24GB)
 - You're the sysadmin
 
-**Good**: Use that $4,000 for cloud credits
+**Good**: Use that $4,000 for cloud compute
 - $4,000 ÷ $0.39/hr = 10,256 L4 hours
 - Or: 1,285 8-hour days of research
 - Or: 3.5 years of full-time L4 access
@@ -505,7 +505,7 @@ All models: STFT-domain, n_fft=1024, 30 epochs, batch_size=16
 - Serves 500 users with 4-day queue
 - High utilization, low throughput
 
-**Consider**: $50M on cloud credits + $50M on other research
+**Consider**: $50M on cloud compute + $50M on other research
 - 500 users × $100k/year = same capacity
 - Zero queue time
 - Elastic scaling

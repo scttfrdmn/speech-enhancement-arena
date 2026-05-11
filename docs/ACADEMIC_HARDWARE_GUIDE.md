@@ -36,7 +36,7 @@ Academic exploration is the opposite pattern: change the model, retrain, look at
 
 ### The "Build on Trainium" Caveat
 
-AWS runs a "Build on Trainium" program at universities that provides credits and resources for Trainium adoption. This is genuinely useful for:
+AWS runs a "Build on Trainium" program at universities that promotes Trainium adoption. The program is genuinely useful for:
 
 - Systems researchers studying custom silicon
 - ML systems courses teaching AOT compilation
@@ -48,7 +48,7 @@ It's a poor fit for:
 - PhD students exploring model architectures
 - Most academic ML research that needs fast iteration
 
-If your work falls into the second group, take the credits but use them for L4 / L40S / Trainium-when-it-fits — not as a Trainium-only deployment.
+If your work falls into the second group, don't accept a Trainium-only deployment as a condition of the program. Pick the hardware that fits your work (typically L4 / L40S) and treat Trainium as one option among several, not the default.
 
 ---
 

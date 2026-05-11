@@ -282,7 +282,7 @@ Professional ML systems courses where the educational goal is learning AOT compi
 
 ### 4. Grant-mandated hardware
 
-Some AWS academic credit programs specify Trainium usage. Pick projects that fit (standard architectures, multiple long runs, production-like workflows) rather than fighting the constraint with novel-architecture exploration.
+Some grants or institutional partnerships specify particular hardware (Trainium in some AWS-backed academic programs, specific GPU types from other sources). When you're already constrained, pick projects that fit the constraint — for Trainium, that means standard architectures, multiple long runs, production-like workflows — rather than fighting the hardware with novel-architecture exploration.
 
 ### 5. Industry collaboration with deployment plan
 

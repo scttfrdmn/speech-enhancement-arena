@@ -2,7 +2,7 @@
 
 For researchers who have an institutional HPC cluster but have never used AWS directly. From "I have an AWS account" to "the arena is training in the cloud," in seven steps. Assumes a Mac/Linux laptop.
 
-> **Don't pay for it yourself.** Before anything below: apply for [AWS Cloud Credit for Research](https://aws.amazon.com/research-credits/) or [AWS Academic Hub](https://aws.amazon.com/education/awseducate/) credits. Most academic projects qualify. Approval takes 1–4 weeks but is worth doing first because the entire walkthrough below can be funded by credits.
+Cloud compute is a legitimate, modest research expense — the full walkthrough below costs well under $1 in actual usage. Treat it the same way you'd treat any other lab expense: budget for it in your grant proposals, get your PI's account or set up a sub-account under the lab's billing, track spend monthly.
 
 ---
 

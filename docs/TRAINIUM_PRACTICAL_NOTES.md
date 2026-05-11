@@ -83,7 +83,7 @@ AWS Neuron ships with a simulator that runs Trainium code on CPU. It's not a per
 
 - **Develop on your laptop.** Install the Neuron SDK on macOS/Linux. Write PyTorch. Run with the simulator. Iterate quickly without spinning up cloud instances.
 - **Validate correctness before deployment.** Catch the XLA-incompatible op or the shape mismatch on CPU, not on a $1.34/hr Trainium.
-- **Lower the learning curve.** You can learn the Trainium development model — `mark_step()` semantics, what compiles and what doesn't, how the cache works — without spending cloud credits.
+- **Lower the learning curve.** You can learn the Trainium development model — `mark_step()` semantics, what compiles and what doesn't, how the cache works — without spending anything on cloud compute.
 
 ### Limitations
 
@@ -141,7 +141,7 @@ L4 wins on raw cost for this workload. Trainium pays off when (a) you're trainin
 
 - **Default for distillation:** Bedrock Distillation. Don't build infrastructure you don't need.
 - **Compilation belongs on cheap x86**, not on Trainium. `r7i.24xlarge` is the right instance — it has the RAM for the compiler's whole-graph IR.
-- **Neuron simulator** lets you develop and validate on a laptop. Use it before spending cloud credits.
+- **Neuron simulator** lets you develop and validate on a laptop. Use it before paying for any cloud compute.
 - **Trainium is for production-like execution**, not for first-time exploration or compilation.
 
 These three tools change Trainium from "expensive specialty hardware" to "one piece of a pipeline that's mostly cheap CPU work." The barrier to learning is much lower than it looks from the SDK docs alone.
