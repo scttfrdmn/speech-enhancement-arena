@@ -163,7 +163,7 @@ class ConvMaskNet(nn.Module):
         mask = self.output_proj(h)
         # Match original spectrogram length
         mask = mask[..., :mag.shape[-1]]
-        enhanced = _polar(mag * mask, phase)
+        enhanced = torch.polar(mag * mask, phase)
         return self.stft_proc.istft(enhanced, length=T)
 
 
@@ -239,7 +239,7 @@ class CRMNet(nn.Module):
 
         enhanced_real = X.real * mask_real - X.imag * mask_imag
         enhanced_imag = X.real * mask_imag + X.imag * mask_real
-        enhanced = _complex(enhanced_real, enhanced_imag)
+        enhanced = torch.complex(enhanced_real, enhanced_imag)
 
         return self.stft_proc.istft(enhanced, length=T)
 
@@ -317,7 +317,7 @@ class AttentionMask(nn.Module):
         mask = self.output_proj(h)         # (B, N, F)
         mask = mask.transpose(1, 2)        # (B, F, N)
 
-        enhanced = _polar(mag * mask, phase)
+        enhanced = torch.polar(mag * mask, phase)
         return self.stft_proc.istft(enhanced, length=T)
 
 
@@ -380,7 +380,7 @@ class GatedRecurrent(nn.Module):
         mask = self.post_net(h)           # (B, N, F)
         mask = mask.transpose(1, 2)       # (B, F, N)
 
-        enhanced = _polar(mag * mask, phase)
+        enhanced = torch.polar(mag * mask, phase)
         return self.stft_proc.istft(enhanced, length=T)
 
 
