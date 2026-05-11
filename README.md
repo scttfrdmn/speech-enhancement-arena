@@ -209,7 +209,10 @@ speech-enhancement-arena/
 
 Audience-facing guides live in `docs/`. Suggested reading order:
 
-- [`HARDWARE_SELECTION.md`](docs/HARDWARE_SELECTION.md) — top-level guide for picking AWS hardware. Start here.
+- [`AWS_GETTING_STARTED.md`](docs/AWS_GETTING_STARTED.md) — never used AWS directly? Start here. Eight steps from `aws configure` to a running arena, with cleanup.
+- [`SPOT_RESILIENCE.md`](docs/SPOT_RESILIENCE.md) — designing training runs that survive spot interruption. Covers the SIGTERM pattern (now in `train.py`'s `--resume` flag), metadata polling, and S3-as-resume-boundary.
+- [`HYBRID_CLOUD_WORKFLOW.md`](docs/HYBRID_CLOUD_WORKFLOW.md) — combining institutional cluster + cloud burst. Three concrete recipes plus when not to bother.
+- [`HARDWARE_SELECTION.md`](docs/HARDWARE_SELECTION.md) — top-level guide for picking AWS hardware.
 - [`ACADEMIC_HARDWARE_GUIDE.md`](docs/ACADEMIC_HARDWARE_GUIDE.md) — researcher-focused decision frameworks, common mistakes, real-talk FAQ.
 - [`GPU_SELECTION_GUIDE.md`](docs/GPU_SELECTION_GUIDE.md) — decision tree for L4 vs L40S vs RTX Pro 6000.
 - [`WHEN_TO_USE_PREMIUM_HARDWARE.md`](docs/WHEN_TO_USE_PREMIUM_HARDWARE.md) — when H100 / Trainium actually pay off vs. L4.

@@ -19,6 +19,7 @@ Usage:
 import argparse
 import json
 import os
+import signal
 import time
 import sys
 from pathlib import Path
@@ -27,6 +28,30 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import math
+
+
+# ---------------------------------------------------------------------------
+# Spot resilience: graceful SIGTERM handler
+# ---------------------------------------------------------------------------
+
+class GracefulShutdown:
+    """Sets self.requested=True on SIGTERM/SIGINT so the training loop can
+    finish the current epoch, checkpoint, and exit cleanly.
+
+    EC2 sends SIGTERM ~2 minutes before reclaiming a spot instance; this
+    window is enough to save a checkpoint and (optionally) sync to S3.
+    See docs/SPOT_RESILIENCE.md for the full pattern.
+    """
+    def __init__(self):
+        self.requested = False
+        signal.signal(signal.SIGTERM, self._handler)
+        signal.signal(signal.SIGINT, self._handler)
+
+    def _handler(self, signum, frame):
+        if not self.requested:
+            print(f"\n[spot] signal {signum} received — will checkpoint and exit "
+                  f"after the current epoch", flush=True)
+        self.requested = True
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -269,6 +294,7 @@ class MetricsLogger:
 
 def train(args):
     device, device_type = setup_device(args.device)
+    shutdown = GracefulShutdown()
 
     # Model
     model_kwargs = {}
@@ -303,6 +329,21 @@ def train(args):
 
     # Optimizer
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+
+    # Resume from a previous checkpoint if requested (spot interruption recovery).
+    # Looks for {checkpoint-dir}/{run-id}_best.pt and loads model + optimizer state.
+    start_epoch = 1
+    if args.resume:
+        resume_path = Path(args.checkpoint_dir) / f"{args.run_id}_best.pt"
+        if resume_path.exists():
+            ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+            model.load_state_dict(ckpt["model_state_dict"])
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            start_epoch = int(ckpt.get("epoch", 0)) + 1
+            print(f"[resume] Loaded {resume_path.name} at epoch {ckpt.get('epoch')} "
+                  f"(loss={ckpt.get('loss', 'n/a'):.4f}); continuing at epoch {start_epoch}")
+        else:
+            print(f"[resume] No checkpoint at {resume_path} — starting from scratch")
 
     # LR scheduler — use constant LR on XLA to avoid graph recompilation.
     # Each unique LR value creates a new XLA graph (scalar embedded in computation).
@@ -352,7 +393,7 @@ def train(args):
         except ImportError:
             pass
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         num_batches = 0
         epoch_start = time.time()
@@ -497,6 +538,12 @@ def train(args):
             else:
                 torch.save(save_dict, ckpt_path)
 
+        # Early exit on spot termination (SIGTERM) — checkpoint above is fresh
+        if shutdown.requested:
+            print(f"[spot] checkpoint at epoch {epoch} saved to {ckpt_path}; exiting.")
+            print(f"[spot] resume with: python train.py --run-id {args.run_id} --resume ...")
+            break
+
     total_time = time.time() - start_time
     avg_throughput = total_samples / max(total_time, 1e-6)
     final_sys = collect_system_metrics(device_type)
@@ -570,6 +617,11 @@ def main():
     # Output
     parser.add_argument("--log-dir", type=str, default="logs")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
+
+    # Spot resilience
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from {checkpoint-dir}/{run-id}_best.pt if it exists "
+                             "(for surviving spot interruption; see docs/SPOT_RESILIENCE.md)")
 
     args = parser.parse_args()
     train(args)
