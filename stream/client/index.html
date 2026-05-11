@@ -30,6 +30,14 @@
 <div id="pipelineStats" class="dim">Ready to stream...</div>
 
 <div class="row">
+  <label for="endpoint">Backend</label>
+  <select id="endpoint" style="flex:1">
+    <option value="">Local (same as page)</option>
+  </select>
+  <button id="btnAddEndpoint" style="padding:0.4rem 0.8rem;font-size:0.9rem">Add Endpoint</button>
+</div>
+
+<div class="row">
   <label for="inDev">Input device</label>
   <select id="inDev" style="flex:1"></select>
 </div>
@@ -79,13 +87,14 @@
 // We detect the actual rate at construction and drive everything from there.
 const TARGET_RATE = 16000;
 const FRAME_MS = 16;              // chunk duration
-// Allow ?server=host:port to point at a remote inference server (Day 3+).
-// Falls back to same-origin if not specified.
-const _serverParam = new URLSearchParams(location.search).get("server");
-const _serverHost = _serverParam || location.host;
-const wsUrl = () => `ws://${_serverHost}/ws?model=${encodeURIComponent($("modelSel").value || "conv_mask")}&bypass=${$("bypass").checked ? 1 : 0}`;
-const _modelsUrl = `http://${_serverHost}/api/models`;
-const _infoUrl = `http://${_serverHost}/api/info`;
+// Backend endpoint selection: defaults to same-origin, can switch via dropdown
+const getServerHost = () => {
+  const selected = $("endpoint").value;
+  return selected || location.host;
+};
+const wsUrl = () => `ws://${getServerHost()}/ws?model=${encodeURIComponent($("modelSel").value || "conv_mask")}&bypass=${$("bypass").checked ? 1 : 0}`;
+const modelsUrl = () => `http://${getServerHost()}/api/models`;
+const infoUrl = () => `http://${getServerHost()}/api/info`;
 
 const $ = (id) => document.getElementById(id);
 const log = (msg) => { $("status").textContent = new Date().toLocaleTimeString() + "  " + msg + "\n" + $("status").textContent; };
@@ -226,7 +235,7 @@ function animate() {
 
 async function loadServerInfo() {
   try {
-    const resp = await fetch(_infoUrl);
+    const resp = await fetch(infoUrl());
     if (!resp.ok) return;
     const info = await resp.json();
     // Update AWS node label with instance type
@@ -558,6 +567,47 @@ $("btnStart").onclick = () => { start().catch(e => { log("start error: " + e.mes
 $("btnStop").onclick = cleanup;
 $("btnTone").onclick = () => { playTone().catch(e => log("tone err: " + e.message)); };
 $("btnMonitor").onclick = () => { toggleMonitor().catch(e => log("monitor err: " + e.message)); };
+
+$("btnAddEndpoint").onclick = () => {
+  const host = prompt("Enter backend endpoint (host:port):", "");
+  if (!host) return;
+  const opt = document.createElement("option");
+  opt.value = host;
+  opt.textContent = host;
+  $("endpoint").appendChild(opt);
+  $("endpoint").value = host;
+  // Trigger endpoint change
+  $("endpoint").dispatchEvent(new Event("change"));
+};
+
+$("endpoint").onchange = () => {
+  log(`switching to backend: ${getServerHost()}`);
+  // Reload models and server info for the new endpoint
+  loadModels().then(() => loadServerInfo()).then(() => {
+    log(`connected to ${getServerHost()}`);
+  });
+  // If currently streaming, reconnect
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    log("endpoint changed — reconnecting WebSocket");
+    ws.close();
+    setTimeout(() => {
+      if (!captureActive) return;
+      ws = new WebSocket(wsUrl());
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => log(`ws reconnected to ${getServerHost()}`);
+      ws.onclose = () => { log("ws close"); cleanup(); };
+      ws.onerror = (e) => log("ws error: " + e.type);
+      ws.onmessage = (ev) => {
+        pipeline.packets.push({ fromId: "aws", toId: "model", progress: 0, color: "#4caf50" });
+        pipeline.packets.push({ fromId: "model", toId: "speakers", progress: 0, color: "#4caf50" });
+        rttMs = Date.now() - lastSendTime;
+        framesRecv++;
+        if (!(ev.data instanceof ArrayBuffer)) return;
+        schedulePlayback(new Int16Array(ev.data));
+      };
+    }, 120);
+  }
+};
 $("bypass").onchange = () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     log("bypass toggled — reconnecting");
@@ -591,7 +641,7 @@ $("outDev").onchange = async () => {
 
 async function loadModels() {
   try {
-    const resp = await fetch(_modelsUrl);
+    const resp = await fetch(modelsUrl());
     if (!resp.ok) return;
     const data = await resp.json();
     const sel = $("modelSel");
@@ -639,6 +689,16 @@ $("modelSel").onchange = () => {
     }, 120);
   }
 };
+
+// Initialize endpoint dropdown from ?server= query param if present
+const _serverParam = new URLSearchParams(location.search).get("server");
+if (_serverParam) {
+  const opt = document.createElement("option");
+  opt.value = _serverParam;
+  opt.textContent = _serverParam;
+  opt.selected = true;
+  $("endpoint").appendChild(opt);
+}
 
 listDevices()
   .then(() => loadModels())
