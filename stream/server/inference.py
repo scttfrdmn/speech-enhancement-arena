@@ -122,7 +122,7 @@ def load_all_models(checkpoint_dir: Path, device: torch.device) -> None:
 
     # Warm up every model with a dummy forward so the first real WebSocket
     # connection doesn't pay the CUDA kernel-compile cost (~5 s on L40S)
-    # or XLA compilation cost (2-8 hours, but should be cached).
+    # or XLA compilation cost (30-60s on Trainium).
     if device.type in ("cuda", "mps", "xla"):
         dummy = torch.zeros(1, int(CONTEXT_SECS * MODEL_RATE), device=device)
         for key, model in MODELS.items():
@@ -176,6 +176,45 @@ async def list_models() -> JSONResponse:
     return JSONResponse(payload)
 
 
+@app.get("/api/info")
+async def server_info() -> JSONResponse:
+    """Return server metadata (instance type, device, region)."""
+    import socket
+    import urllib.request
+
+    # Try to fetch EC2 instance metadata (only works on actual EC2 instances)
+    instance_type = "unknown"
+    region = "unknown"
+    try:
+        metadata_url = "http://169.254.169.254/latest/meta-data"
+        req = urllib.request.Request(
+            f"{metadata_url}/instance-type",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"}
+        )
+        with urllib.request.urlopen(req, timeout=0.5) as resp:
+            instance_type = resp.read().decode("utf-8")
+
+        req = urllib.request.Request(
+            f"{metadata_url}/placement/region",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"}
+        )
+        with urllib.request.urlopen(req, timeout=0.5) as resp:
+            region = resp.read().decode("utf-8")
+    except Exception:
+        # Not on EC2 or metadata service unavailable
+        pass
+
+    device_str = str(DEVICE) if DEVICE else "unknown"
+
+    return JSONResponse({
+        "instance_type": instance_type,
+        "region": region,
+        "device": device_str,
+        "hostname": socket.gethostname(),
+        "models_loaded": list(MODELS.keys()),
+    })
+
+
 _MODEL_LABELS = {
     "conv_mask": "ConvMask",
     "crm": "CRM",
@@ -191,7 +230,7 @@ app.mount("/static", StaticFiles(directory=CLIENT_DIR), name="static")
 # ---------------------------------------------------------------------------
 
 @app.websocket("/ws")
-async def ws_infer(ws: WebSocket, model: str = "") -> None:
+async def ws_infer(ws: WebSocket, model: str = "", bypass: int = 0) -> None:
     await ws.accept()
     peer = f"{ws.client.host}:{ws.client.port}"
 
@@ -212,9 +251,21 @@ async def ws_infer(ws: WebSocket, model: str = "") -> None:
     guard_samples = int(0.010 * MODEL_RATE)  # 10 ms
 
     log.info(
-        "ws-open  %s model=%s context=%.2fs hop=%.2fs capture=%d model_rate=%d",
-        peer, model_key, CONTEXT_SECS, HOP_SECS, CAPTURE_RATE, MODEL_RATE,
+        "ws-open  %s model=%s bypass=%d context=%.2fs hop=%.2fs capture=%d model_rate=%d",
+        peer, model_key, bypass, CONTEXT_SECS, HOP_SECS, CAPTURE_RATE, MODEL_RATE,
     )
+
+    # Bypass mode: echo raw input without model processing (for A/B comparison)
+    if bypass:
+        try:
+            while True:
+                frame = await ws.receive_bytes()
+                await ws.send_bytes(frame)
+        except WebSocketDisconnect:
+            log.info("ws-close %s (bypass mode)", peer)
+        except Exception as exc:
+            log.exception("ws-error %s (bypass): %s", peer, exc)
+        return
 
     # Sliding-window inference:
     #   context  — fixed-length circular history buffer fed to the model each hop.
@@ -261,7 +312,7 @@ async def ws_infer(ws: WebSocket, model: str = "") -> None:
             with torch.no_grad():
                 enhanced = active_model(model_input.unsqueeze(0)).squeeze(0)
 
-            # XLA synchronization point (for Trainium/TPU)
+            # XLA sync point — ensures graph execution completes before dependent ops
             if DEVICE.type == "xla":
                 import torch_xla.core.xla_model as xm
                 xm.mark_step()
@@ -324,26 +375,30 @@ def main() -> None:
                         help="Sample rate the browser client ships (ctx.sampleRate)")
     parser.add_argument("--model-rate", type=int, default=16000,
                         help="Model's native sample rate (16 kHz for all arena models)")
-    parser.add_argument("--demo-noise", default=None,
-                        choices=["cafeteria", "traffic", "white"],
-                        help="Add synthetic noise for dramatic demo (makes enhancement obvious)")
-    parser.add_argument("--demo-bypass", action="store_true",
-                        help="Bypass mode: echo raw input without enhancement")
     args = parser.parse_args()
 
     global DEVICE, CONTEXT_SECS, HOP_SECS, INPUT_BOOST, CAPTURE_RATE, MODEL_RATE
 
-    # Handle XLA/Neuron device creation
-    if args.device in ("xla", "neuron"):
-        if args.device == "xla":
+    # XLA-aware device creation (pattern from train.py:102-143)
+    if args.device == "neuron":
+        try:
+            import torch_neuronx  # noqa: F401
+            DEVICE = torch.device("xla")
+            log.info("device: Trainium via TorchNeuron native")
+        except ImportError:
+            log.warning("torch_neuronx not available, falling back to CPU")
+            DEVICE = torch.device("cpu")
+    elif args.device == "xla":
+        try:
             import torch_xla.core.xla_model as xm
             DEVICE = xm.xla_device()
-            log.info("Using XLA device (Trainium/TPU)")
-        else:
-            DEVICE = torch.device("neuron")
-            log.info("Using Neuron device (Trainium native)")
+            log.info("device: XLA (legacy PyTorch/XLA)")
+        except ImportError:
+            log.warning("torch_xla not available, falling back to CPU")
+            DEVICE = torch.device("cpu")
     else:
         DEVICE = torch.device(args.device)
+
     CONTEXT_SECS = args.context
     HOP_SECS = args.hop
     INPUT_BOOST = args.input_boost

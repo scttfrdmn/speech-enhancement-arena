@@ -15,10 +15,19 @@
   #meter > div { height: 100%; background: linear-gradient(to right, #4caf50, #ff9800, #f44336); width: 0%; transition: width 60ms linear; }
   .dim { color: #888; }
   code { background: #f4f4f4; padding: 0 0.3em; border-radius: 2px; }
+  #pipeline { display: block; width: 100%; border: 1px solid #ddd; border-radius: 4px; margin: 1rem 0; background: #fafafa; }
+  #pipelineStats { font-size: 0.8rem; color: #666; margin-top: 0.5rem; }
+  .spec-container { display: flex; gap: 1rem; margin: 1rem 0; }
+  .spec-box { flex: 1; }
+  .spec-box h3 { margin: 0 0 0.5rem 0; font-size: 0.9rem; color: #666; }
+  .spec-box canvas { width: 100%; border: 1px solid #ddd; border-radius: 4px; background: #000; display: block; }
 </style>
 </head>
 <body>
 <h1>Streaming Arena</h1>
+
+<canvas id="pipeline" width="800" height="120"></canvas>
+<div id="pipelineStats" class="dim">Ready to stream...</div>
 
 <div class="row">
   <label for="inDev">Input device</label>
@@ -34,6 +43,12 @@
   <span id="modelMeta" class="dim" style="font-size:0.8rem;margin-left:0.5rem"></span>
 </div>
 <div class="row">
+  <label>
+    <input type="checkbox" id="bypass" />
+    Bypass (hear raw input)
+  </label>
+</div>
+<div class="row">
   <label>Input level</label>
   <div id="meter" style="flex:1"><div></div></div>
 </div>
@@ -43,6 +58,17 @@
   <button id="btnTone">Test Tone</button>
   <button id="btnMonitor">Monitor (no WS)</button>
   <span id="rtt" class="dim"></span>
+</div>
+
+<div class="spec-container">
+  <div class="spec-box">
+    <h3>Input Spectrum</h3>
+    <canvas id="inputSpec" width="300" height="150"></canvas>
+  </div>
+  <div class="spec-box">
+    <h3>Output Spectrum (Enhanced)</h3>
+    <canvas id="outputSpec" width="300" height="150"></canvas>
+  </div>
 </div>
 
 <pre id="status">Idle.</pre>
@@ -57,8 +83,9 @@ const FRAME_MS = 16;              // chunk duration
 // Falls back to same-origin if not specified.
 const _serverParam = new URLSearchParams(location.search).get("server");
 const _serverHost = _serverParam || location.host;
-const wsUrl = () => `ws://${_serverHost}/ws?model=${encodeURIComponent($("modelSel").value || "conv_mask")}`;
+const wsUrl = () => `ws://${_serverHost}/ws?model=${encodeURIComponent($("modelSel").value || "conv_mask")}&bypass=${$("bypass").checked ? 1 : 0}`;
 const _modelsUrl = `http://${_serverHost}/api/models`;
+const _infoUrl = `http://${_serverHost}/api/info`;
 
 const $ = (id) => document.getElementById(id);
 const log = (msg) => { $("status").textContent = new Date().toLocaleTimeString() + "  " + msg + "\n" + $("status").textContent; };
@@ -72,6 +99,153 @@ let ws = null;
 let nextPlaybackTime = 0;
 let framesSent = 0;
 let framesRecv = 0;
+let lastSendTime = 0;
+let rttMs = 0;
+
+// Pipeline visualization state
+const pipeline = {
+  nodes: [
+    { id: "mic", label: "🎤 Mic", x: 60, y: 60 },
+    { id: "browser", label: "💻 Browser", x: 220, y: 60 },
+    { id: "aws", label: "☁️ ...", x: 420, y: 60 },
+    { id: "model", label: "🧠 Model", x: 620, y: 60 },
+    { id: "speakers", label: "🔊 Speakers", x: 740, y: 60 }
+  ],
+  edges: [
+    { from: "mic", to: "browser" },
+    { from: "browser", to: "aws" },
+    { from: "aws", to: "model" },
+    { from: "model", to: "speakers" }
+  ],
+  packets: [], // {fromId, toId, progress: 0-1, color}
+  deviceColor: "#666"
+};
+
+// Spectrogram state
+let inputAnalyser = null;
+let outputAnalyser = null;
+let animationId = null;
+
+function drawPipeline() {
+  const canvas = $("pipeline");
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Draw edges
+  ctx.strokeStyle = "#ddd";
+  ctx.lineWidth = 2;
+  for (const edge of pipeline.edges) {
+    const from = pipeline.nodes.find(n => n.id === edge.from);
+    const to = pipeline.nodes.find(n => n.id === edge.to);
+    if (!from || !to) continue;
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.stroke();
+  }
+
+  // Draw packets (animated dots)
+  for (const p of pipeline.packets) {
+    const from = pipeline.nodes.find(n => n.id === p.fromId);
+    const to = pipeline.nodes.find(n => n.id === p.toId);
+    if (!from || !to) continue;
+    const x = from.x + (to.x - from.x) * p.progress;
+    const y = from.y + (to.y - from.y) * p.progress;
+    ctx.fillStyle = p.color || "#4caf50";
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+
+  // Draw nodes
+  ctx.font = "14px system-ui";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  for (const node of pipeline.nodes) {
+    ctx.fillStyle = node.id === "aws" ? pipeline.deviceColor : "#666";
+    ctx.fillText(node.label, node.x, node.y);
+  }
+}
+
+function updatePipeline() {
+  const now = Date.now();
+  // Advance packet positions (speed: 0.05 progress per frame @ 60fps ≈ 333ms travel time)
+  for (let i = pipeline.packets.length - 1; i >= 0; i--) {
+    pipeline.packets[i].progress += 0.05;
+    if (pipeline.packets[i].progress >= 1) {
+      pipeline.packets.splice(i, 1);
+    }
+  }
+  drawPipeline();
+
+  // Update stats
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    const stats = `Latency: ${rttMs}ms | Sent: ${framesSent} | Recv: ${framesRecv}`;
+    $("pipelineStats").textContent = stats;
+  }
+}
+
+function drawSpectrograms() {
+  if (!inputAnalyser || !outputAnalyser) return;
+
+  const inputCanvas = $("inputSpec");
+  const outputCanvas = $("outputSpec");
+  const inputCtx = inputCanvas.getContext("2d");
+  const outputCtx = outputCanvas.getContext("2d");
+
+  const bufLen = inputAnalyser.frequencyBinCount;
+  const inputData = new Uint8Array(bufLen);
+  const outputData = new Uint8Array(bufLen);
+
+  inputAnalyser.getByteFrequencyData(inputData);
+  outputAnalyser.getByteFrequencyData(outputData);
+
+  const draw = (ctx, data, width, height) => {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, width, height);
+    const barWidth = width / bufLen;
+    for (let i = 0; i < bufLen; i++) {
+      const barHeight = (data[i] / 255) * height;
+      // Green for speech range (roughly bins 10-100 at 48kHz), gray otherwise
+      ctx.fillStyle = (i > 10 && i < 100) ? "#4caf50" : "#666";
+      ctx.fillRect(i * barWidth, height - barHeight, barWidth, barHeight);
+    }
+  };
+
+  draw(inputCtx, inputData, inputCanvas.width, inputCanvas.height);
+  draw(outputCtx, outputData, outputCanvas.width, outputCanvas.height);
+}
+
+function animate() {
+  updatePipeline();
+  drawSpectrograms();
+  animationId = requestAnimationFrame(animate);
+}
+
+async function loadServerInfo() {
+  try {
+    const resp = await fetch(_infoUrl);
+    if (!resp.ok) return;
+    const info = await resp.json();
+    // Update AWS node label with instance type
+    const awsNode = pipeline.nodes.find(n => n.id === "aws");
+    if (awsNode) {
+      awsNode.label = `☁️ ${info.instance_type || "unknown"}`;
+    }
+    // Color code by device: blue for CUDA, green for XLA
+    if (info.device && info.device.includes("cuda")) {
+      pipeline.deviceColor = "#2196f3"; // blue
+    } else if (info.device && info.device.includes("xla")) {
+      pipeline.deviceColor = "#4caf50"; // green
+    }
+    drawPipeline();
+    log(`server: ${info.instance_type || "unknown"} (${info.device}) in ${info.region || "?"}`);
+  } catch (e) {
+    log("warn: could not load server info (" + e.message + ")");
+  }
+}
 
 async function ensureCtx() {
   if (audioCtx && audioCtx.state !== "closed") return audioCtx;
@@ -177,12 +351,34 @@ async function start() {
 
   frameSamples = Math.round(actualRate * FRAME_MS / 1000);
 
+  // Create analysers for spectrograms
+  inputAnalyser = audioCtx.createAnalyser();
+  inputAnalyser.fftSize = 256;
+  outputAnalyser = audioCtx.createAnalyser();
+  outputAnalyser.fftSize = 256;
+
+  // Connect mic to input analyser (we'll feed it from the capture pump)
+  // For now, create a dummy source - we'll update with actual audio later via scriptProcessor workaround
+  // Actually, we can connect the MediaStreamSource to inputAnalyser
+  const micSrc = audioCtx.createMediaStreamSource(micStream);
+  micSrc.connect(inputAnalyser);
+
+  // Start animation loop
+  if (!animationId) animate();
+
   ws = new WebSocket(wsUrl());
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => { log("ws open"); $("btnStop").disabled = false; };
+  ws.onopen = () => {
+    log("ws open" + ($("bypass").checked ? " (bypass mode)" : ""));
+    $("btnStop").disabled = false;
+  };
   ws.onclose = () => { log("ws close"); cleanup(); };
   ws.onerror = (e) => { log("ws error: " + e.type); };
   ws.onmessage = (ev) => {
+    // Inject return packet
+    pipeline.packets.push({ fromId: "aws", toId: "model", progress: 0, color: "#4caf50" });
+    pipeline.packets.push({ fromId: "model", toId: "speakers", progress: 0, color: "#4caf50" });
+    rttMs = Date.now() - lastSendTime;
     framesRecv++;
     if (!(ev.data instanceof ArrayBuffer)) {
       if (framesRecv === 1) log("warn: ws returned " + typeof ev.data + ", expected ArrayBuffer");
@@ -258,6 +454,10 @@ async function start() {
             if (peak > sentMaxRecent) sentMaxRecent = Math.round(peak * 32767);
             meter.style.width = Math.min(100, peak * 100 * 4) + "%";
             if (ws && ws.readyState === 1) {
+              // Inject outbound packets
+              pipeline.packets.push({ fromId: "mic", toId: "browser", progress: 0, color: "#2196f3" });
+              pipeline.packets.push({ fromId: "browser", toId: "aws", progress: 0, color: "#2196f3" });
+              lastSendTime = Date.now();
               ws.send(pcm.buffer);
               framesSent++;
               if (framesSent % 60 === 0) {
@@ -287,6 +487,12 @@ function schedulePlayback(int16) {
   const toStereo = audioCtx.createChannelMerger(2);
   src.connect(toStereo, 0, 0);
   src.connect(toStereo, 0, 1);
+
+  // Connect to output analyser for spectrogram
+  if (outputAnalyser) {
+    src.connect(outputAnalyser);
+  }
+
   toStereo.connect(audioCtx.destination);
   const now = audioCtx.currentTime;
   const startAt = Math.max(now + 0.005, nextPlaybackTime);
@@ -336,14 +542,44 @@ function cleanup() {
   try { micStream?.getTracks().forEach(t => t.stop()); } catch (e) {}
   try { audioCtx?.close(); } catch (e) {}
   try { ws?.close(); } catch (e) {}
+  if (animationId) {
+    cancelAnimationFrame(animationId);
+    animationId = null;
+  }
+  inputAnalyser = null;
+  outputAnalyser = null;
   $("btnStart").disabled = false;
   $("btnStop").disabled = true;
+  pipeline.packets = [];
+  $("pipelineStats").textContent = "Ready to stream...";
 }
 
 $("btnStart").onclick = () => { start().catch(e => { log("start error: " + e.message); cleanup(); }); };
 $("btnStop").onclick = cleanup;
 $("btnTone").onclick = () => { playTone().catch(e => log("tone err: " + e.message)); };
 $("btnMonitor").onclick = () => { toggleMonitor().catch(e => log("monitor err: " + e.message)); };
+$("bypass").onchange = () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    log("bypass toggled — reconnecting");
+    ws.close();
+    setTimeout(() => {
+      if (!captureActive) return;
+      ws = new WebSocket(wsUrl());
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => log(`ws reconnected (bypass=${$("bypass").checked})`);
+      ws.onclose = () => { log("ws close"); cleanup(); };
+      ws.onerror = (e) => log("ws error: " + e.type);
+      ws.onmessage = (ev) => {
+        pipeline.packets.push({ fromId: "aws", toId: "model", progress: 0, color: "#4caf50" });
+        pipeline.packets.push({ fromId: "model", toId: "speakers", progress: 0, color: "#4caf50" });
+        rttMs = Date.now() - lastSendTime;
+        framesRecv++;
+        if (!(ev.data instanceof ArrayBuffer)) return;
+        schedulePlayback(new Int16Array(ev.data));
+      };
+    }, 120);
+  }
+};
 $("outDev").onchange = async () => {
   if (audioCtx && typeof audioCtx.setSinkId === "function") {
     try {
@@ -404,7 +640,13 @@ $("modelSel").onchange = () => {
   }
 };
 
-listDevices().then(() => loadModels()).then(() => log("ready — pick devices and press Start"));
+listDevices()
+  .then(() => loadModels())
+  .then(() => loadServerInfo())
+  .then(() => {
+    log("ready — pick devices and press Start");
+    drawPipeline(); // Initial draw
+  });
 navigator.mediaDevices.addEventListener("devicechange", listDevices);
 </script>
 </body>
