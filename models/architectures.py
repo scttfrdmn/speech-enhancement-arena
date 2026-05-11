@@ -325,6 +325,21 @@ class AttentionMask(nn.Module):
 # Model 4: GatedRecurrent — Deep GRU-based sequential mask estimator
 # ---------------------------------------------------------------------------
 
+class _GRUOutputOnly(nn.Module):
+    """Wrapper around nn.GRU that returns only the output tensor (not the
+    `(output, h_n)` tuple). nn.GRU's tuple return makes models containing it
+    non-traceable via `torch_neuronx.trace`; this wrapper is the documented
+    workaround. See https://awsdocs-neuron.readthedocs-hosted.com/en/latest/frameworks/torch/torch-neuronx/api-reference-guide/inference/api-torch-neuronx-trace.html
+    """
+    def __init__(self, **gru_kwargs):
+        super().__init__()
+        self.gru = nn.GRU(**gru_kwargs)
+
+    def forward(self, x):
+        out, _ = self.gru(x)
+        return out
+
+
 class GatedRecurrent(nn.Module):
     """
     Deep Bidirectional GRU with Conv pre/post-nets for mask estimation.
@@ -354,8 +369,11 @@ class GatedRecurrent(nn.Module):
             num_layers=num_layers, batch_first=True,
             dropout=0.1 if num_layers > 1 else 0,
         )
-        self.gru_fwd = nn.GRU(bidirectional=False, **gru_kwargs)
-        self.gru_rev = nn.GRU(bidirectional=False, **gru_kwargs)
+        # Wrap nn.GRU so it returns just the output tensor (not the tuple).
+        # The tuple return otherwise breaks torch_neuronx.trace with
+        # "list_trace[idx] == nullptr" in PyTorch 2.9's JIT tracer.
+        self.gru_fwd = _GRUOutputOnly(bidirectional=False, **gru_kwargs)
+        self.gru_rev = _GRUOutputOnly(bidirectional=False, **gru_kwargs)
 
         # Post-net: refine GRU output
         self.post_net = nn.Sequential(
@@ -373,9 +391,9 @@ class GatedRecurrent(nn.Module):
         phase = X.angle()
 
         h = self.pre_net(mag)             # (B, hidden, N)
-        h = h.transpose(1, 2)            # (B, N, hidden)
-        h_fwd, _ = self.gru_fwd(h)
-        h_rev, _ = self.gru_rev(torch.flip(h, dims=[1]))
+        h = h.transpose(1, 2)             # (B, N, hidden)
+        h_fwd = self.gru_fwd(h)           # tensor (not tuple)
+        h_rev = self.gru_rev(torch.flip(h, dims=[1]))
         h = torch.cat([h_fwd, torch.flip(h_rev, dims=[1])], dim=-1)
         mask = self.post_net(h)           # (B, N, F)
         mask = mask.transpose(1, 2)       # (B, F, N)
