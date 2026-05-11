@@ -430,7 +430,7 @@ def print_arena_economics(arena_results, instance_type="g7e.2xlarge"):
     # Find Trainium option
     trn_options = [c for c in comparisons if "trn" in c["instance"]]
     nvidia_options = [c for c in comparisons if c["instance"] == instance_type]
-    if trn_options and nvidia_options:
+    if trn_options and nvidia_options and nvidia_options[0]["cost_on_demand"] > 0:
         trn = trn_options[0]
         nv = nvidia_options[0]
         savings = (1 - trn["cost_on_demand"] / nv["cost_on_demand"]) * 100
