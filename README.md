@@ -5,6 +5,8 @@
 A self-contained demo for the ASPIRE group workshop that trains and compares four speech enhancement architectures — simultaneously on MIG-partitioned GPUs or Trainium NeuronCores — then serves a live web demo where you speak into a microphone and hear each model's enhancement in real-time.
 
 > **📖 New to ML hardware selection?** Read [**Hardware Selection Guide**](docs/HARDWARE_SELECTION.md) — learn why L4 spot at $0.39/hr often beats waiting 4 days for a "free" H200, and when to use Trainium vs GPU for training.
+>
+> **📺 Running the live demo?** Step-by-step walk-through in [**docs/LIVE_DEMO_STEPS.md**](docs/LIVE_DEMO_STEPS.md) (g7e MIG vs Trainium, side-by-side mic→enhancement→speaker on one browser tab).
 
 ## Architecture
 
@@ -29,9 +31,9 @@ A self-contained demo for the ASPIRE group workshop that trains and compares fou
                               arena.py orchestrates
                             4 parallel train.py processes
                                          │
-                                    ┌────┴────┐
-                                    │ serve.py│──→ Browser: record/upload → hear it
-                                    └─────────┘
+                                    ┌────────────────────────────┐
+                                    │ stream/server/inference.py │──→ Browser: mic → enhanced speakers (live)
+                                    └────────────────────────────┘
 ```
 
 ## The Four Models
@@ -53,10 +55,10 @@ pip install -r requirements.txt
 # Train all 4 models (CPU, fast test)
 python arena.py --device cpu --epochs 5 --num-samples 500
 
-# Launch the live demo
-python serve.py --checkpoint-dir checkpoints --device cpu
+# Launch the live streaming demo (mic → model → speakers)
+uv run python stream/server/inference.py --checkpoint-dir checkpoints --device cpu --port 8765
 
-# Open http://localhost:8000 → record audio → hear the difference
+# Open http://localhost:8765 → click Start → speak into mic, hear enhancement
 ```
 
 ## AWS g7e with MIG (Recommended for Research)
@@ -81,9 +83,11 @@ pip install -r requirements.txt
 # 4. Launch the arena (auto-discovers MIG slices, runs 4 models in parallel)
 python arena.py --device cuda --epochs 30
 
-# 5. Serve the demo (loads best checkpoints)
-python serve.py --checkpoint-dir checkpoints --device cuda
+# 5. Serve the live streaming demo on the same instance
+uv run python stream/server/inference.py --checkpoint-dir checkpoints --device cuda --port 8765
 ```
+
+Full demo walk-through in [`docs/LIVE_DEMO_STEPS.md`](docs/LIVE_DEMO_STEPS.md).
 
 **Why MIG?** Run all 4 models simultaneously on one instance. Faster than sequential, same cost.
 
@@ -116,8 +120,8 @@ python arena.py --device neuron --epochs 30
 #    First epoch is slower (compilation), rest are faster.
 python arena.py --device neuron --compile --epochs 30
 
-# 5. Serve (CPU inference is fine for the demo)
-python serve.py --checkpoint-dir checkpoints --device cpu
+# 5. Serve the live streaming demo on Trainium
+uv run python stream/server/inference.py --checkpoint-dir checkpoints --device neuron --port 8765
 ```
 
 ### What `--device neuron` Does Differently
@@ -156,7 +160,7 @@ source /opt/aws_neuronx_venv_pytorch/bin/activate
 pip install -r requirements.txt
 
 python arena.py --device xla --epochs 30
-python serve.py --checkpoint-dir checkpoints --device cpu
+uv run python stream/server/inference.py --checkpoint-dir checkpoints --device xla --port 8765
 
 # NOTE: This path requires xm.mark_step() after each backward pass
 # (handled automatically by the training script). Consider upgrading
@@ -179,7 +183,10 @@ python arena.py --device cuda --clean-dir /path/to/clean/wavs --epochs 30
 speech-enhancement-arena/
 ├── arena.py              # Orchestrator — launches 4 parallel training runs
 ├── train.py              # Single-model training script (MIG/Trainium aware)
-├── serve.py              # FastAPI inference server + web UI
+├── serve.py              # Legacy file-upload demo (kept for offline A/B testing)
+├── stream/
+│   ├── server/inference.py   # Live streaming WebSocket demo (canonical)
+│   └── client/index.html     # Streaming web UI (mic, pipeline canvas, spectrograms)
 ├── requirements.txt
 ├── models/
 │   ├── __init__.py
@@ -188,7 +195,7 @@ speech-enhancement-arena/
 │   ├── __init__.py
 │   └── data.py           # Synthetic data generation + WAV loading
 ├── static/
-│   └── index.html        # Web UI (mic recording, spectrograms, A/B audio)
+│   └── index.html        # Legacy file-upload web UI (paired with serve.py)
 ├── logs/                  # Training logs (JSONL, read by dashboard)
 └── checkpoints/           # Model checkpoints
 ```
@@ -197,7 +204,7 @@ speech-enhancement-arena/
 
 1. **Train on NVIDIA (15 min):** Run `arena.py --device cuda` — watch 4 models race on 4 MIG slices
 2. **Compare (5 min):** See the scoreboard — which architecture won?
-3. **Listen (10 min):** Run `serve.py` — record your voice, add noise, hear each model clean it
+3. **Listen (10 min):** Run `stream/server/inference.py` — speak into the mic, hear each model clean it in real time. Walk-through in [`docs/LIVE_DEMO_STEPS.md`](docs/LIVE_DEMO_STEPS.md).
 4. **Train on Trainium (15 min):** Run `arena.py --device neuron --compile` — same code, different silicon
 5. **Compare across hardware (5 min):** NVIDIA vs. Trainium — training time, cost, quality
 6. **Discuss:** Why did CRM beat magnitude masking? Why is attention slower but sometimes better? What would torch.compile + NKI kernels unlock?
