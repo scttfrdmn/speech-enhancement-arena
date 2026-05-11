@@ -38,22 +38,24 @@ A self-contained demo for the ASPIRE group workshop that trains and compares fou
 
 ## The Four Models
 
-| Model | Architecture | Params | Inspired By |
-|-------|-------------|--------|-------------|
-| **ConvMaskNet** | Conv encoder-decoder, magnitude mask | 1.2M | Baseline |
-| **CRMNet** | Complex Ratio Mask estimator | 2.8M | Williamson & Wang (IEEE TASLP, 2017) |
-| **AttentionMask** | Multi-head self-attention mask | 3.6M | SWIM (ASPIRE, 2024) |
-| **GatedRecurrent** | Bidirectional GRU mask | 2.1M | Nayem & Williamson (IEEE TASLP, 2024) |
+| Model | Architecture | Params (small / large) | Inspired By |
+|-------|-------------|------------------------|-------------|
+| **ConvMaskNet** | Conv U-Net encoder-decoder, magnitude mask | 5.0M / 47.5M | Baseline |
+| **CRMNet** | Dilated TCN, Complex Ratio Mask | 2.8M / 25.2M | Williamson & Wang (IEEE TASLP, 2017) |
+| **AttentionMask** | Transformer mask estimator | 3.6M / 33.1M | SWIM (ASPIRE, 2024) |
+| **GatedRecurrent** | Deep BiGRU mask | 2.2M / 15.0M | Nayem & Williamson (IEEE TASLP, 2024) |
 
-All models operate in the STFT domain, estimate masks, and reconstruct via iSTFT — exactly the ASPIRE pipeline.
+All models operate in the STFT domain, estimate masks, and reconstruct via iSTFT — exactly the ASPIRE pipeline. `--scale small` (n_fft=512) is the default; `--scale large` (n_fft=1024) is for production-quality benchmarks.
 
 ## Quick Start (CPU, for testing)
 
 ```bash
-pip install -r requirements.txt
+# Install via uv (recommended — reads pyproject.toml)
+uv sync
+# Or pip:  pip install -r requirements.txt
 
 # Train all 4 models (CPU, fast test)
-python arena.py --device cpu --epochs 5 --num-samples 500
+uv run python arena.py --device cpu --epochs 5 --num-samples 500
 
 # Launch the live streaming demo (mic → model → speakers)
 uv run python stream/server/inference.py --checkpoint-dir checkpoints --device cpu --port 8765
@@ -196,9 +198,27 @@ speech-enhancement-arena/
 │   └── data.py           # Synthetic data generation + WAV loading
 ├── static/
 │   └── index.html        # Legacy file-upload web UI (paired with serve.py)
-├── logs/                  # Training logs (JSONL, read by dashboard)
-└── checkpoints/           # Model checkpoints
+├── logs/                  # Training logs (JSONL, per-epoch metrics + final summary)
+├── checkpoints/           # Model checkpoints
+└── economics.py           # Cost / right-sizing analysis for arena runs
 ```
+
+## Documentation
+
+Audience-facing guides live in `docs/`. Suggested reading order:
+
+- [`HARDWARE_SELECTION.md`](docs/HARDWARE_SELECTION.md) — top-level guide for picking AWS hardware. Start here.
+- [`ACADEMIC_HARDWARE_GUIDE.md`](docs/ACADEMIC_HARDWARE_GUIDE.md) — researcher-focused decision frameworks, common mistakes, real-talk FAQ.
+- [`GPU_SELECTION_GUIDE.md`](docs/GPU_SELECTION_GUIDE.md) — decision tree for L4 vs L40S vs RTX Pro 6000.
+- [`WHEN_TO_USE_PREMIUM_HARDWARE.md`](docs/WHEN_TO_USE_PREMIUM_HARDWARE.md) — when H100 / Trainium actually pay off vs. L4.
+- [`CORE_PRINCIPLES.md`](docs/CORE_PRINCIPLES.md) — why bigger isn't always better for research.
+- [`SPECS_VS_REALITY.md`](docs/SPECS_VS_REALITY.md) — why peak FLOPS don't predict real training speed.
+- [`RESEARCH_VS_PRODUCTION_MODELS.md`](docs/RESEARCH_VS_PRODUCTION_MODELS.md) — when to optimize for time-to-publication vs. cost-at-scale.
+- [`COMPILATION_FAQ.md`](docs/COMPILATION_FAQ.md) — why Trainium compilation takes hours (and CUDA doesn't).
+- [`TRAINIUM_PRACTICAL_NOTES.md`](docs/TRAINIUM_PRACTICAL_NOTES.md) — three things that change the Trainium cost picture (Bedrock alternative, cross-compile on x86, Neuron simulator).
+- [`TRAINIUM_QUICKSTART.md`](TRAINIUM_QUICKSTART.md) — step-by-step Trainium setup.
+- [`TRAINIUM_NOTES.md`](TRAINIUM_NOTES.md) — pre-flight checklist and compile gotchas.
+- [`BENCHMARK_RESULTS.md`](BENCHMARK_RESULTS.md) — measured throughput, SI-SDR, and cost across hardware.
 
 ## Workshop Flow
 
@@ -223,8 +243,8 @@ speech-enhancement-arena/
 - **torch.compile support:** On `neuron`, JIT-compiles to Trainium instructions via Neuron compiler; on `cuda`, uses inductor backend
 - **No mark_step on neuron:** TorchNeuron native runs in true eager mode — the legacy `xla` path is the only one needing `xm.mark_step()`
 - **Synthetic data by default:** No dataset downloads needed for the workshop
-- **JSONL logging:** Training dashboard reads logs in real-time via polling
-- **Web Audio API:** Mic recording works in Chrome/Firefox, no plugins needed
+- **JSONL logging:** Per-epoch metrics streamed to `logs/arena_*.jsonl`; `arena.py` parses them live to drive the terminal scoreboard
+- **WebSocket streaming:** Browser mic captured at 48 kHz, resampled to 16 kHz, sent to the inference server in 100 ms hops; enhanced PCM streams back on the same WebSocket
 
 ## Extending This
 
