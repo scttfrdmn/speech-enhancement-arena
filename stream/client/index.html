@@ -243,11 +243,17 @@ async function loadServerInfo() {
     if (awsNode) {
       awsNode.label = `☁️ ${info.instance_type || "unknown"}`;
     }
-    // Color code by device: blue for CUDA, green for XLA
-    if (info.device && info.device.includes("cuda")) {
-      pipeline.deviceColor = "#2196f3"; // blue
-    } else if (info.device && info.device.includes("xla")) {
+    // Color code by hardware family: green for Trainium/Inferentia (trn*/inf*),
+    // blue for NVIDIA GPU instances (g*/p*), gray otherwise.
+    const itype = (info.instance_type || "").toLowerCase();
+    if (itype.startsWith("trn") || itype.startsWith("inf")) {
       pipeline.deviceColor = "#4caf50"; // green
+    } else if (itype.startsWith("g") || itype.startsWith("p")) {
+      pipeline.deviceColor = "#2196f3"; // blue
+    } else if (info.device && info.device.includes("cuda")) {
+      pipeline.deviceColor = "#2196f3"; // blue (fallback)
+    } else if (info.device && info.device.includes("xla")) {
+      pipeline.deviceColor = "#4caf50"; // green (fallback, legacy XLA path)
     }
     drawPipeline();
     log(`server: ${info.instance_type || "unknown"} (${info.device}) in ${info.region || "?"}`);
