@@ -150,7 +150,13 @@ def load_all_models(checkpoint_dir: Path, device: torch.device) -> None:
         )
 
         if traced_path is not None:
-            # Neuron-traced path
+            # Neuron-traced path. Must import torch_neuronx BEFORE jit.load so
+            # the __torch__.torch.classes.neuron.Model TypeMeta is registered.
+            try:
+                import torch_neuronx  # noqa: F401
+            except ImportError:
+                log.warning("torch_neuronx not installed; cannot load %s — skipping", traced_path)
+                continue
             try:
                 core = torch.jit.load(str(traced_path), map_location="cpu")
             except Exception as e:
