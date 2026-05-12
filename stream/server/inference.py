@@ -44,8 +44,53 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from models import get_model, SCALE_CONFIGS  # noqa: E402
+from models.architectures import STFTProcessor  # noqa: E402
 
 log = logging.getLogger("stream.infer")
+
+
+# ---------------------------------------------------------------------------
+# Neuron path: wrapper that calls a traced "core" (mag/RI -> mask) on
+# NeuronCore while STFT/iSTFT run on host CPU. See scripts/trace_for_neuron.py
+# and docs/TRAINIUM_PRACTICAL_NOTES.md §4.
+# ---------------------------------------------------------------------------
+
+class NeuronCoreWrapper(torch.nn.Module):
+    """Adapts a traced FFT-free core to the streaming server's (waveform -> waveform)
+    interface. Does STFT/iSTFT on the host CPU around the Neuron-compiled core."""
+
+    def __init__(self, model_key: str, traced_core: torch.jit.ScriptModule,
+                 n_fft: int, hop_length: int = None):
+        super().__init__()
+        self.model_key = model_key
+        self.core = traced_core
+        self.stft_proc = STFTProcessor(n_fft=n_fft, hop_length=hop_length or n_fft // 4)
+        self._freq_bins = n_fft // 2 + 1
+        # mimic the regular model's `name` / `description` attributes
+        self.name = {
+            "conv_mask": "ConvMaskNet", "crm": "CRMNet",
+            "attention": "AttentionMask", "gru": "GatedRecurrent",
+        }.get(model_key, model_key)
+        self.description = f"{self.name} (Neuron-traced core, CPU STFT)"
+
+    def forward(self, noisy_wav: torch.Tensor) -> torch.Tensor:
+        T = noisy_wav.shape[-1]
+        X = self.stft_proc.stft(noisy_wav)
+        if self.model_key == "crm":
+            x_ri = torch.cat([X.real, X.imag], dim=1)
+            mask_ri = self.core(x_ri)
+            mr = mask_ri[:, :self._freq_bins, :]
+            mi = mask_ri[:, self._freq_bins:, :]
+            enhanced = torch.complex(
+                X.real * mr - X.imag * mi,
+                X.real * mi + X.imag * mr,
+            )
+        else:
+            mag = X.abs()
+            phase = X.angle()
+            mask = self.core(mag)
+            enhanced = torch.polar(mag * mask, phase)
+        return self.stft_proc.istft(enhanced, length=T)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
 app = FastAPI(title="Streaming Arena — Inference")
@@ -75,22 +120,64 @@ _MODEL_KEYS = ["conv_mask", "crm", "attention", "gru"]
 
 
 def load_all_models(checkpoint_dir: Path, device: torch.device) -> None:
-    """Load every recognised checkpoint in *checkpoint_dir* into MODELS."""
+    """Load every recognised checkpoint in *checkpoint_dir* into MODELS.
+
+    Two modes:
+      * Regular checkpoint (`arena_<key>_best.pt`): loaded via get_model +
+        load_state_dict. Runs on whatever `device` is (cuda/mps/cpu/xla).
+      * Traced Neuron core (`<key>_traced.pt`): loaded via torch.jit.load and
+        wrapped in NeuronCoreWrapper. STFT/iSTFT run on host CPU, the core
+        runs on NeuronCore. Use this path for `--device neuron` serving.
+
+    Auto-detects which type each file is. A traced core takes priority if both
+    exist (lets you stage a traced core alongside the training checkpoint).
+    """
     global MODELS, MODEL_META, DEFAULT_MODEL
 
     for model_key in _MODEL_KEYS:
-        patterns = [f"arena_{model_key}_best.pt", f"*{model_key}*best.pt"]
-        ckpt_path = None
-        for pat in patterns:
-            matches = list(checkpoint_dir.glob(pat))
-            if matches:
-                ckpt_path = matches[0]
-                break
-        if ckpt_path is None:
+        # Look for traced TorchScript first, regular checkpoint second
+        traced_patterns = [f"{model_key}_traced.pt", f"{model_key}_*.pt", f"*{model_key}*traced*.pt"]
+        regular_patterns = [f"arena_{model_key}_best.pt", f"*{model_key}*best.pt"]
+
+        traced_path = next(
+            (m for pat in traced_patterns for m in checkpoint_dir.glob(pat)
+             if "best" not in m.name),
+            None,
+        )
+        regular_path = next(
+            (m for pat in regular_patterns for m in checkpoint_dir.glob(pat)),
+            None,
+        )
+
+        if traced_path is not None:
+            # Neuron-traced path
+            try:
+                core = torch.jit.load(str(traced_path), map_location="cpu")
+            except Exception as e:
+                log.warning("could not load %s as TorchScript (%s); skipping", traced_path, e)
+                continue
+            # n_fft from sibling regular checkpoint metadata if present, else default small
+            n_fft = 512
+            scale = "small"
+            loss = None
+            n_params = "?"
+            if regular_path is not None:
+                meta = torch.load(regular_path, map_location="cpu", weights_only=False)
+                scale = meta.get("scale", "small")
+                n_fft = meta.get("n_fft") or SCALE_CONFIGS[scale][model_key].get("n_fft", 512)
+                loss = meta.get("loss", None)
+                n_params = meta.get("params", "?")
+            model = NeuronCoreWrapper(model_key, core, n_fft=n_fft).eval()
+            MODELS[model_key] = model
+            MODEL_META[model_key] = {"scale": scale, "params": n_params, "loss": loss, "n_fft": n_fft}
+            log.info("loaded %s from %s (traced, n_fft=%d)", model_key, traced_path.name, n_fft)
+            continue
+
+        if regular_path is None:
             log.info("skip %s: no checkpoint found in %s", model_key, checkpoint_dir)
             continue
 
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        ckpt = torch.load(regular_path, map_location=device, weights_only=False)
         scale = ckpt.get("scale", "small")
         n_params = ckpt.get("params", "?")
         loss = ckpt.get("loss", None)
@@ -121,10 +208,18 @@ def load_all_models(checkpoint_dir: Path, device: torch.device) -> None:
     log.info("default model: %s  |  available: %s", DEFAULT_MODEL, list(MODELS))
 
     # Warm up every model with a dummy forward so the first real WebSocket
-    # connection doesn't pay the CUDA kernel-compile cost (~5 s on L40S)
-    # or XLA compilation cost (30-60s on Trainium).
-    if device.type in ("cuda", "mps", "xla"):
-        dummy = torch.zeros(1, int(CONTEXT_SECS * MODEL_RATE), device=device)
+    # connection doesn't pay the CUDA kernel-compile cost (~5 s on L40S),
+    # XLA compilation cost (30-60s on Trainium), or first-traced-call cost
+    # for NeuronCoreWrapper (~10-30s — NeuronCore JIT load).
+    needs_warmup = device.type in ("cuda", "mps", "xla") or any(
+        isinstance(m, NeuronCoreWrapper) for m in MODELS.values()
+    )
+    if needs_warmup:
+        # Wrapper expects CPU input; regular models take device input.
+        warmup_device = torch.device("cpu") if any(
+            isinstance(m, NeuronCoreWrapper) for m in MODELS.values()
+        ) else device
+        dummy = torch.zeros(1, int(CONTEXT_SECS * MODEL_RATE), device=warmup_device)
         for key, model in MODELS.items():
             with torch.no_grad():
                 _ = model(dummy)
@@ -381,13 +476,12 @@ def main() -> None:
 
     # XLA-aware device creation (pattern from train.py:102-143)
     if args.device == "neuron":
-        try:
-            import torch_neuronx  # noqa: F401
-            DEVICE = torch.device("xla")
-            log.info("device: Trainium via TorchNeuron native")
-        except ImportError:
-            log.warning("torch_neuronx not available, falling back to CPU")
-            DEVICE = torch.device("cpu")
+        # Native Neuron path: traced cores load via torch.jit, they handle
+        # NeuronCore dispatch internally. The streaming server keeps tensors
+        # on CPU; the wrapper does CPU STFT/iSTFT and the traced core runs
+        # on NeuronCore. We don't need torch_neuronx imported at server level.
+        DEVICE = torch.device("cpu")
+        log.info("device: Trainium via traced cores (CPU host, NeuronCore for compute)")
     elif args.device == "xla":
         try:
             import torch_xla.core.xla_model as xm
