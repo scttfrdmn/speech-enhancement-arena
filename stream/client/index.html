@@ -498,25 +498,43 @@ function schedulePlayback(int16) {
   buf.copyToChannel(f32, 0);
   const src = audioCtx.createBufferSource();
   src.buffer = buf;
+  // Per-buffer gain envelope: short linear fade in/out (~2ms each side) hides
+  // hop-boundary discontinuities from the server's independent-frame inference
+  // and absorbs scheduling jitter between consecutive BufferSources.
+  const fadeSec = 0.002;
+  const dur = f32.length / actualRate;
+  const gain = audioCtx.createGain();
   // Mono → both L/R via a ChannelMerger, same pattern as Monitor mode.
   const toStereo = audioCtx.createChannelMerger(2);
-  src.connect(toStereo, 0, 0);
-  src.connect(toStereo, 0, 1);
+  src.connect(gain);
+  gain.connect(toStereo, 0, 0);
+  gain.connect(toStereo, 0, 1);
 
-  // Connect to output analyser for spectrogram
   if (outputAnalyser) {
-    src.connect(outputAnalyser);
+    gain.connect(outputAnalyser);
   }
 
   toStereo.connect(audioCtx.destination);
   const now = audioCtx.currentTime;
+  // Clamp playback queue depth: if we've drifted more than 180ms ahead of the
+  // audio clock (e.g. audioCtx vs system clock skew, or a brief input burst),
+  // reset so end-to-end latency stays bounded. Costs one dropped chunk.
+  const maxQueueSec = 0.18;
+  if (nextPlaybackTime > now + maxQueueSec) {
+    nextPlaybackTime = now + 0.005;
+  }
   const startAt = Math.max(now + 0.005, nextPlaybackTime);
+  // Schedule fade envelope: 0 → 1 over fadeSec, hold, then 1 → 0 over fadeSec.
+  gain.gain.setValueAtTime(0, startAt);
+  gain.gain.linearRampToValueAtTime(1, startAt + fadeSec);
+  gain.gain.setValueAtTime(1, startAt + Math.max(fadeSec, dur - fadeSec));
+  gain.gain.linearRampToValueAtTime(0, startAt + dur);
   if (framesRecv === 1) {
-    src.onended = () => log(`first echo src ended (startAt=${startAt.toFixed(3)}, ctx now=${audioCtx.currentTime.toFixed(3)}, dur=${(f32.length/actualRate).toFixed(3)}s)`);
+    src.onended = () => log(`first echo src ended (startAt=${startAt.toFixed(3)}, ctx now=${audioCtx.currentTime.toFixed(3)}, dur=${dur.toFixed(3)}s)`);
     log(`scheduling first echo: startAt=${startAt.toFixed(3)} now=${now.toFixed(3)} destCh=${audioCtx.destination.channelCount} state=${audioCtx.state}`);
   }
   src.start(startAt);
-  nextPlaybackTime = startAt + f32.length / actualRate;
+  nextPlaybackTime = startAt + dur;
 }
 
 let monitorNode = null;
@@ -575,14 +593,15 @@ $("btnTone").onclick = () => { playTone().catch(e => log("tone err: " + e.messag
 $("btnMonitor").onclick = () => { toggleMonitor().catch(e => log("monitor err: " + e.message)); };
 
 $("btnAddEndpoint").onclick = () => {
-  const host = prompt("Enter backend endpoint (host:port):", "");
+  let host = prompt("Enter backend endpoint (host:port):", "");
+  if (!host) return;
+  host = host.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
   if (!host) return;
   const opt = document.createElement("option");
   opt.value = host;
   opt.textContent = host;
   $("endpoint").appendChild(opt);
   $("endpoint").value = host;
-  // Trigger endpoint change
   $("endpoint").dispatchEvent(new Event("change"));
 };
 
