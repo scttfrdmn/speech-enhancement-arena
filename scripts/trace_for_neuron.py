@@ -150,11 +150,15 @@ CORE_BUILDERS = {
 
 def make_example_input(model_key: str, scale: str, audio_samples: int = 8000):
     """Build a representative magnitude/RI tensor matching what the streaming
-    server's CPU STFT will produce at inference time."""
+    server's CPU STFT will produce at inference time.
+
+    torch.stft with center=True (the default in STFTProcessor.stft) produces
+    n_frames = 1 + audio_samples // hop_length frames.
+    """
     cfg = SCALE_CONFIGS[scale][model_key]
     n_fft = cfg.get("n_fft", 512)
     hop = n_fft // 4
-    n_frames = (audio_samples - n_fft) // hop + 1 + 1  # +1 for center=True
+    n_frames = 1 + audio_samples // hop  # center=True formula
     freq_bins = n_fft // 2 + 1
     # CRM uses [real|imag] = 2*freq_bins channels; others use mag = freq_bins
     if model_key == "crm":
