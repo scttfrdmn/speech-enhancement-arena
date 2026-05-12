@@ -277,22 +277,28 @@ async def server_info() -> JSONResponse:
     import socket
     import urllib.request
 
-    # Try to fetch EC2 instance metadata (only works on actual EC2 instances)
+    # Try to fetch EC2 instance metadata via IMDSv2 (the default on current
+    # DLAMIs). v2 requires: PUT to /api/token to get a token, then send the
+    # token on every metadata GET.
     instance_type = "unknown"
     region = "unknown"
     try:
-        metadata_url = "http://169.254.169.254/latest/meta-data"
-        req = urllib.request.Request(
-            f"{metadata_url}/instance-type",
-            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"}
+        # Step 1: get an IMDSv2 token (PUT, not GET)
+        token_req = urllib.request.Request(
+            "http://169.254.169.254/latest/api/token",
+            method="PUT",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
         )
+        with urllib.request.urlopen(token_req, timeout=0.5) as resp:
+            token = resp.read().decode("utf-8")
+
+        # Step 2: GET metadata with the token
+        metadata_url = "http://169.254.169.254/latest/meta-data"
+        auth_header = {"X-aws-ec2-metadata-token": token}
+        req = urllib.request.Request(f"{metadata_url}/instance-type", headers=auth_header)
         with urllib.request.urlopen(req, timeout=0.5) as resp:
             instance_type = resp.read().decode("utf-8")
-
-        req = urllib.request.Request(
-            f"{metadata_url}/placement/region",
-            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"}
-        )
+        req = urllib.request.Request(f"{metadata_url}/placement/region", headers=auth_header)
         with urllib.request.urlopen(req, timeout=0.5) as resp:
             region = resp.read().decode("utf-8")
     except Exception:
