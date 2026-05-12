@@ -1,8 +1,8 @@
 # Speech Enhancement Arena
 
-**4 models. 4 GPU slices. 1 winner. You be the judge.**
+**4 models. NVIDIA + Trainium, side by side. You be the judge.**
 
-A self-contained demo for the ASPIRE group workshop that trains and compares four speech enhancement architectures — simultaneously on MIG-partitioned GPUs or Trainium NeuronCores — then serves a live web demo where you speak into a microphone and hear each model's enhancement in real-time.
+A self-contained demo for the ASPIRE group workshop that trains four speech enhancement architectures on NVIDIA GPUs (one box, MIG-partitionable if you want them running in parallel) and serves them live from both an NVIDIA backend and an AWS Trainium backend (via traced cores). Speak into a microphone, hear each model's enhancement in real-time, switch hardware backends from the same page.
 
 > **📖 New to ML hardware selection?** Read [**Hardware Selection Guide**](docs/HARDWARE_SELECTION.md) — learn why L4 spot at $0.39/hr often beats waiting 4 days for a "free" H200, and when to use Trainium vs GPU for training.
 >
@@ -11,29 +11,44 @@ A self-contained demo for the ASPIRE group workshop that trains and compares fou
 ## Architecture
 
 ```
-                    ┌─────────────────────────────────────────────────┐
-                    │         NVIDIA G7e (--device cuda)               │
-                    │  ┌──────────┬──────────┬──────────┬──────────┐  │
-                    │  │MIG 24 GB │MIG 24 GB │MIG 24 GB │MIG 24 GB │  │
-                    │  │ConvMask  │  CRMNet  │Attention │   GRU    │  │
-                    │  └──────────┴──────────┴──────────┴──────────┘  │
-                    └─────────────────────────────────────────────────┘
-
-                    ┌─────────────────────────────────────────────────┐
-                    │      Trainium (--device neuron or --device xla)  │
-                    │  ┌──────────┬──────────┬──────────┬──────────┐  │
-                    │  │NeuronCor │NeuronCor │NeuronCor │NeuronCor │  │
-                    │  │    e0    │    e1    │    e2    │    e3    │  │
-                    │  │ConvMask  │  CRMNet  │Attention │   GRU    │  │
-                    │  └──────────┴──────────┴──────────┴──────────┘  │
-                    └─────────────────────────────────────────────────┘
-                                         │
-                              arena.py orchestrates
-                            4 parallel train.py processes
-                                         │
-                                    ┌────────────────────────────┐
-                                    │ stream/server/inference.py │──→ Browser: mic → enhanced speakers (live)
-                                    └────────────────────────────┘
+            ┌────────────────────── TRAIN ──────────────────────┐
+            │                                                   │
+            │   NVIDIA GPU (--device cuda)                      │
+            │   ┌──────────────────────────────────────────┐    │
+            │   │  g7e.2xlarge   1× RTX PRO 6000 Blackwell │    │
+            │   │  (96 GB; demo uses whole GPU,            │    │
+            │   │   optionally MIG-partitioned 4×24 GB)    │    │
+            │   └──────────────────────────────────────────┘    │
+            │   arena.py runs 4 train.py processes (one per     │
+            │   model) — serialised on a whole GPU, or in       │
+            │   parallel across 4 MIG slices if enabled.        │
+            │                                                   │
+            │   Trainium training (optional, --device neuron    │
+            │   or xla) is supported in train.py but not on the │
+            │   live demo path; see TRAINIUM_QUICKSTART.md.     │
+            └───────────────────────┬───────────────────────────┘
+                                    │
+                  checkpoints/arena_<model>_best.pt
+                                    │
+                 (for Trainium serving: traced via
+                  scripts/trace_for_neuron.py →
+                  checkpoints/<model>_traced.pt)
+                                    │
+            ┌────────────────────── SERVE ──────────────────────┐
+            │                                                   │
+            │   stream/server/inference.py                      │
+            │                                                   │
+            │   ┌─────────────────────┐  ┌──────────────────┐   │
+            │   │ NVIDIA  (cuda)      │  │ Trainium (neuron)│   │
+            │   │ all 4 models on the │  │ traced cores on  │   │
+            │   │ same GPU            │  │ NeuronCore (CPU  │   │
+            │   │                     │  │ host STFT/iSTFT) │   │
+            │   │ g5/g6/g6e/g7e       │  │ trn1.2xlarge     │   │
+            │   │                     │  │ (2 NeuronCores)  │   │
+            │   └─────────────────────┘  └──────────────────┘   │
+            └───────────────────────┬───────────────────────────┘
+                                    │
+                  Browser: mic → enhanced speakers (live, WebSocket)
 ```
 
 ## The Four Models
